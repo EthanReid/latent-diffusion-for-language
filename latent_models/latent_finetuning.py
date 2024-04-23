@@ -76,7 +76,7 @@ def num_to_groups(num, divisor):
 def set_seeds(seed):
     random.seed(seed)
     torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
+    #torch.cuda.manual_seed(seed)
 
 # trainer class
 
@@ -96,6 +96,7 @@ class Trainer(object):
         adam_weight_decay = 0.01,
         num_samples = None,
         eval_every = 1000,
+        save_every = 100,
         results_folder = './results',
         mixed_precision = 'no',
         seed=43,
@@ -140,6 +141,7 @@ class Trainer(object):
             self.accelerator.print(f'num trainable params: {num_trainable_params}')
 
         self.eval_every = eval_every
+        self.save_every = save_every
 
         self.train_batch_size = train_batch_size
         self.eval_batch_size = eval_batch_size
@@ -387,13 +389,16 @@ class Trainer(object):
                 else:
                     logs = {"train/loss": total_loss, "grad_norm": grad_norm, "lr": self.lr_scheduler.get_last_lr()[0], "step": self.step, "epoch": (self.step)/len(self.dataloader), "samples": self.step*self.train_batch_size*self.num_devices}
 
+                if self.step != 0 and self.step % self.save_every == 0:
+                    self.save()
+
                 if accelerator.is_main_process:
                     accelerator.log(logs, step=self.step)
 
                 if self.step % self.eval_every == 0:
                     self.validation()
                     accelerator.wait_for_everyone()
-                    self.save()
+                    #self.save()
                     self.lm.train() 
 
                 pbar.update(1)

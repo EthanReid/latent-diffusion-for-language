@@ -89,6 +89,7 @@ if __name__ == "__main__":
     parser.add_argument("--eval", action="store_true")
     parser.add_argument("--resume_training", action="store_true", default=False)
     parser.add_argument("--resume_dir", type=str, default=None)
+    parser.add_argument("--device", type=str, default="cuda")
 
     args = parser.parse_args()
 

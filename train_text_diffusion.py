@@ -50,7 +50,7 @@ def main(args):
         seq2seq=(args.dataset_name in {'xsum', 'qqp', 'qg', 'wmt14-de-en', 'wmt14-en-de'}),
         seq2seq_context_dim=lm_dim, 
         num_dense_connections=args.num_dense_connections,
-    ).cuda()
+    ).to(args.device) #.cuda()
 
     args.trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
@@ -66,7 +66,7 @@ def main(args):
         train_prob_self_cond = args.train_prob_self_cond,
         seq2seq_unconditional_prob = args.seq2seq_unconditional_prob,
         scale = args.scale,
-    ).cuda()
+    ).to(args.device) #.cuda()
 
     trainer = Trainer(
         args=args,
@@ -230,6 +230,7 @@ if __name__ == "__main__":
     parser.add_argument("--resume_dir", type=str, default=None)
     parser.add_argument("--latent_model_path", type=str, default=None)
     parser.add_argument("--init_path", type=str, default=None)
+    parser.add_argument("--device", type=str, default="cuda")
     
     args = parser.parse_args()
     assert not (args.eval and args.resume_training)

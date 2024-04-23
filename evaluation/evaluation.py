@@ -8,10 +8,11 @@ import spacy
 import numpy as np
 import wandb
 
-def compute_perplexity(all_texts_list, model_id='gpt2-large'):
-    torch.cuda.empty_cache() 
+def compute_perplexity(all_texts_list, model_id='gpt2-large', device="cuda"):
+    if device == "cuda":
+        torch.cuda.empty_cache() 
     perplexity = load("perplexity", module_type="metric")
-    results = perplexity.compute(predictions=all_texts_list, model_id=model_id, device='cuda')
+    results = perplexity.compute(predictions=all_texts_list, model_id=model_id, device=device) #device = "cuda"
     return results['mean_perplexity']
 
 def compute_wordcount(all_texts_list):
@@ -60,8 +61,9 @@ def compute_memorization(all_texts_list, human_references, n=4):
 
     return duplicate/total
 
-def compute_mauve(all_texts_list, human_references, model_id):
-    torch.cuda.empty_cache() 
+def compute_mauve(all_texts_list, human_references, model_id, device="cuda"):
+    if device == "cuda":
+        torch.cuda.empty_cache() 
     assert model_id == 'gpt2-large'
     mauve = load("mauve")
 

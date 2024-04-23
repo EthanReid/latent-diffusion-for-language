@@ -144,7 +144,7 @@ def time_to_alpha(t, alpha_schedule, scale):
 def set_seeds(seed):
     random.seed(seed)
     torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
+    #torch.cuda.manual_seed(seed)
 
 class GaussianDiffusion(nn.Module):
     def __init__(
@@ -582,6 +582,7 @@ class Trainer(object):
         adam_betas = (0.9, 0.99),
         adam_weight_decay = 0.01,
         save_and_sample_every = 5000,
+        save_every = 1000,
         num_samples = 25,
         seq2seq_candidates = 10,
         seq2seq_train_context_encoder = False,
@@ -631,6 +632,7 @@ class Trainer(object):
         self.num_samples = num_samples
         self.seq2seq_candidates = seq2seq_candidates
         self.save_and_sample_every = save_and_sample_every
+        self.save_every = save_every
 
         self.train_batch_size = train_batch_size
         self.eval_batch_size = eval_batch_size
@@ -834,7 +836,8 @@ class Trainer(object):
         self.reference_dict[f"reference/val_memorization"] = evaluation.compute_memorization(val_subset, self.dataset['train']['text'])
         self.reference_dict['reference/train_unique_wordcount'] = evaluation.compute_wordcount(train_subset)
         self.reference_dict['reference/val_unique_wordcounts'] = evaluation.compute_wordcount(val_subset)
-        torch.cuda.empty_cache() 
+        if self.accelerator.device == "cuda":
+            torch.cuda.empty_cache() 
             
             
     @torch.no_grad()
@@ -843,7 +846,8 @@ class Trainer(object):
         accelerator = self.accelerator
         device = accelerator.device
         self.diffusion.to('cpu')
-        torch.cuda.empty_cache() 
+        if self.accelerator.device == "cuda":
+            torch.cuda.empty_cache() 
 
         self.ema.ema_model.eval()
 
@@ -909,7 +913,8 @@ class Trainer(object):
         metrics = {}
 
         self.ema.to('cpu')
-        torch.cuda.empty_cache() 
+        if self.accelerator.device == "cuda":
+            torch.cuda.empty_cache() 
         for strategy, all_texts_list in text_generations.items():
             class_id_prefix = f'cond{class_id}_' if exists(class_id) else ''
             file_utils.save_text_samples(all_texts_list, os.path.join(self.results_folder, f'{"eval-" if self.args.eval else ""}{f"eval{seed}-" if self.args.eval_test else ""}{class_id_prefix}{strategy}-sample-{milestone}.txt'))
@@ -940,7 +945,8 @@ class Trainer(object):
             print(metrics_dict)
         else:
             accelerator.log({**metrics,**self.reference_dict}, self.step)
-        torch.cuda.empty_cache() 
+        if self.accelerator.device == "cuda":
+            torch.cuda.empty_cache() 
         self.diffusion.to(device)
         self.ema.to(device)
 
@@ -1140,7 +1146,8 @@ class Trainer(object):
         
         accelerator.log(metrics, self.step)
         print(metrics)
-        torch.cuda.empty_cache() 
+        if self.accelerator.device == "cuda":
+            torch.cuda.empty_cache() 
 
     def train(self):
         accelerator = self.accelerator
@@ -1211,6 +1218,8 @@ class Trainer(object):
                 accelerator.wait_for_everyone()
 
                 self.step += 1
+                if self.step != 0 and self.step % self.save_every == 0:
+                    self.save()
                 if accelerator.is_main_process:
                     logs = {
                         "loss": total_loss,

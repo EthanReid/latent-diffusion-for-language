@@ -7,7 +7,8 @@ import numpy as np
 import torch
 
 import CONSTANTS
-from diffusion.text_denoising_diffusion import GaussianDiffusion, Trainer
+from diffusion.text_denoising_diffusion import GaussianDiffusion
+from diffusion.text_consistency_distillation import ConsistencyDistillation, Trainer
 from model.diffusion_transformer import DiffusionTransformer
 
 ATTN_HEAD_DIM=64
@@ -35,7 +36,7 @@ def main(args):
         lm_dim = 768
 
     assert args.tx_dim%ATTN_HEAD_DIM==0, f'Transformer dimension must be divisible by {ATTN_HEAD_DIM}'
-    model = DiffusionTransformer(
+    online_model = DiffusionTransformer(
         tx_dim = args.tx_dim,
         tx_depth = args.tx_depth,
         heads = args.tx_dim//ATTN_HEAD_DIM,
@@ -52,11 +53,45 @@ def main(args):
         num_dense_connections=args.num_dense_connections,
     ).to(args.device) #.cuda()
 
-    args.trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    target_model = DiffusionTransformer(
+        tx_dim = args.tx_dim,
+        tx_depth = args.tx_depth,
+        heads = args.tx_dim//ATTN_HEAD_DIM,
+        latent_dim = latent_dim,
+        max_seq_len = args.max_seq_len,
+        self_condition = args.self_condition,
+        scale_shift = args.scale_shift,
+        dropout = 0 if args.disable_dropout else 0.1,
+        class_conditional= args.class_conditional,
+        num_classes= (CONSTANTS.NUM_CLASSES[args.dataset_name] if args.class_conditional else 0),
+        class_unconditional_prob= args.class_unconditional_prob,
+        seq2seq=(args.dataset_name in {'xsum', 'qqp', 'qg', 'wmt14-de-en', 'wmt14-en-de'}),
+        seq2seq_context_dim=lm_dim, 
+        num_dense_connections=args.num_dense_connections,
+    ).to(args.device) #.cuda()
+
+    diffusion_model = DiffusionTransformer(
+        tx_dim = args.tx_dim,
+        tx_depth = args.tx_depth,
+        heads = args.tx_dim//ATTN_HEAD_DIM,
+        latent_dim = latent_dim,
+        max_seq_len = args.max_seq_len,
+        self_condition = args.self_condition,
+        scale_shift = args.scale_shift,
+        dropout = 0 if args.disable_dropout else 0.1,
+        class_conditional= args.class_conditional,
+        num_classes= (CONSTANTS.NUM_CLASSES[args.dataset_name] if args.class_conditional else 0),
+        class_unconditional_prob= args.class_unconditional_prob,
+        seq2seq=(args.dataset_name in {'xsum', 'qqp', 'qg', 'wmt14-de-en', 'wmt14-en-de'}),
+        seq2seq_context_dim=lm_dim, 
+        num_dense_connections=args.num_dense_connections,
+    ).to(args.device) #.cuda()
+
+    args.trainable_params = sum(p.numel() for p in online_model.parameters() if p.requires_grad)
 
     diffusion = GaussianDiffusion(
-        model,
-        max_seq_len = model.max_seq_len,
+        diffusion,
+        max_seq_len = diffusion.max_seq_len,
         sampling_timesteps = args.sampling_timesteps,     # number of sampling steps
         sampler = args.sampler,
         train_schedule= args.train_schedule, 
@@ -68,9 +103,15 @@ def main(args):
         scale = args.scale,
     ).to(args.device) #.cuda()
 
+    consistencyDistillation = ConsistencyDistillation(
+        online_model=online_model,
+        target_model=target_model,
+        diffusion_model=diffusion_model
+    )
+
     trainer = Trainer(
         args=args,
-        diffusion=diffusion,
+        consistency=consistencyDistillation,
         dataset_name=args.dataset_name,
         train_batch_size = args.train_batch_size,
         eval_batch_size = args.eval_batch_size,
@@ -89,6 +130,7 @@ def main(args):
         results_folder = args.output_dir,
         amp = args.amp,
         mixed_precision = args.mixed_precision,
+        init_models=args.init_models
     )
 
     if args.eval:
@@ -98,7 +140,7 @@ def main(args):
         else:
             trainer.sample()
         if args.class_conditional:
-            for class_id in range(model.num_classes):
+            for class_id in range(diffusion_model.num_classes):
                 trainer.sample(class_id=class_id)
         return
     if args.eval_test:
@@ -111,7 +153,7 @@ def main(args):
                 trainer.dataset = trainer.dataset.shuffle(seed)
                 trainer.sample(seed=seed, test=True)
                 if args.class_conditional:
-                    for class_id in range(model.num_classes):
+                    for class_id in range(diffusion_model.num_classes):
                         trainer.sample(class_id=class_id, seed=seed, test=True)
         return
 
@@ -125,7 +167,7 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Training arguments")
     parser.add_argument("--dataset_name", type=str, default=None)
-    parser.add_argument("--save_dir", type=str, default="saved_diff_models")
+    parser.add_argument("--save_dir", type=str, default="saved_consistency_models")
     parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument("--wandb_name", type=str, default=None)
     # Optimization hyperparameters
@@ -231,6 +273,8 @@ if __name__ == "__main__":
     parser.add_argument("--latent_model_path", type=str, default=None)
     parser.add_argument("--init_path", type=str, default=None)
     parser.add_argument("--device", type=str, default="mps")
+    parser.add_argument("--init_model", action="store_true", default=False)
+    parser.add_argument("--diffusion_model_path", type=str, default=None)
     
     args = parser.parse_args()
     assert not (args.eval and args.resume_training)

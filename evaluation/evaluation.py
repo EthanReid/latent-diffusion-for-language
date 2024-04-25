@@ -12,7 +12,7 @@ def compute_perplexity(all_texts_list, model_id='gpt2-large', device="mps"):
     if device == "cuda":
         torch.cuda.empty_cache() 
     perplexity = load("perplexity", module_type="metric")
-    results = perplexity.compute(predictions=all_texts_list, model_id=model_id, device=device) #device = "cuda"
+    results = perplexity.compute(predictions=all_texts_list, model_id=model_id, device="cpu" if device not in ["gpu", "cpu", "cuda"] else device) #device = "cuda"
     return results['mean_perplexity']
 
 def compute_wordcount(all_texts_list):

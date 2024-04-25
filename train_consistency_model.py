@@ -90,8 +90,8 @@ def main(args):
     args.trainable_params = sum(p.numel() for p in online_model.parameters() if p.requires_grad)
 
     diffusion = GaussianDiffusion(
-        diffusion,
-        max_seq_len = diffusion.max_seq_len,
+        diffusion_model,
+        max_seq_len = diffusion_model.max_seq_len,
         sampling_timesteps = args.sampling_timesteps,     # number of sampling steps
         sampler = args.sampler,
         train_schedule= args.train_schedule, 
@@ -106,7 +106,7 @@ def main(args):
     consistencyDistillation = ConsistencyDistillation(
         online_model=online_model,
         target_model=target_model,
-        diffusion_model=diffusion_model
+        diffusion_model=diffusion
     )
 
     trainer = Trainer(
@@ -140,7 +140,7 @@ def main(args):
         else:
             trainer.sample()
         if args.class_conditional:
-            for class_id in range(diffusion_model.num_classes):
+            for class_id in range(diffusion.num_classes):
                 trainer.sample(class_id=class_id)
         return
     if args.eval_test:
@@ -153,7 +153,7 @@ def main(args):
                 trainer.dataset = trainer.dataset.shuffle(seed)
                 trainer.sample(seed=seed, test=True)
                 if args.class_conditional:
-                    for class_id in range(diffusion_model.num_classes):
+                    for class_id in range(diffusion.num_classes):
                         trainer.sample(class_id=class_id, seed=seed, test=True)
         return
 
@@ -273,7 +273,7 @@ if __name__ == "__main__":
     parser.add_argument("--latent_model_path", type=str, default=None)
     parser.add_argument("--init_path", type=str, default=None)
     parser.add_argument("--device", type=str, default="mps")
-    parser.add_argument("--init_model", action="store_true", default=False)
+    parser.add_argument("--init_models", action="store_true", default=False)
     parser.add_argument("--diffusion_model_path", type=str, default=None)
     
     args = parser.parse_args()

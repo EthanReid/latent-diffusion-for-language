@@ -45,8 +45,7 @@ from utils.torch_utils import compute_grad_norm
 import utils.file_utils as file_utils
 from latent_models.latent_utils import get_latent_model
 from evaluation import evaluation
-from text_denoising_diffusion import GaussianDiffusion
-from text_consistency_distillation import Trainer as GuassianDiffusionTrainer
+from diffusion.text_denoising_diffusion import GaussianDiffusion
 from model.diffusion_transformer import DiffusionTransformer
 
 
@@ -93,8 +92,6 @@ def right_pad_dims_to(x, t):
     if padding_dims <= 0:
         return t
     return t.view(*t.shape, *((1,) * padding_dims))
-
-# gaussian diffusion trainer class
 
 def extract(a, t, x_shape):
     b, *_ = t.shape
@@ -207,6 +204,38 @@ class ConsistencyDistillation(nn.Module):
         model_output = c_skip*z_t + c_out*model_output
         return model_output
 
+    def scms(self, shape, lengths, class_id, seq2seq_cond, seq2seq_mask, cls_free_guidance=1.0, l2_normalize=False, invert=False, z_t=None, steps=1):
+        '''
+        Self-Consitional Multi Step sampling
+        '''
+        assert steps != 0
+        batch, device = shape[0], next(self.online_model.parameters()).device
+        times = torch.linspace(1, 0,steps, device=device)
+        times = times.unsqueeze(0)
+        alphas = self.diffusion_model.sampling_schedule(times)
+        
+        if not exists(z_t):
+            z_t = torch.randn(shape, device=device)
+        z_hat_0 = None
+        
+        if self.diffusion_model.using_latent_model:
+            mask = torch.ones((shape[0], shape[1]), dtype=torch.bool, device=device)
+        else:    
+            mask = [[True]*length + [False]*(self.diffusion_model.max_seq_len-length) for length in lengths]
+            mask = torch.tensor(mask, dtype=torch.bool, device=device)
+        
+        print("scms sample for {} steps".format(str(steps)))
+        for i, (time, alpha) in enumerate(zip(times, alphas)):
+            if i!=0:
+                noise = torch.randn_like(z_t)
+                z_t = alpha.sqrt()*z_t + (1-alpha).sqrt()*noise
+            z_hat_0 = self.consistency_model_predictions(z_t, mask, time, class_id=class_id, z_self_cond=z_hat_0, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask, sampling=True, cls_free_guidance=cls_free_guidance, l2_normalize=l2_normalize)
+        return (z_hat_0, mask)
+
+    def sample(self, batch_size, length, class_id=None, seq2seq_cond=None, seq2seq_mask=None, cls_free_guidance=1.0, l2_normalize=False, steps=1):
+        max_seq_len, latent_dim = self.diffusion_model.max_seq_len, self.diffusion_model.latent_dim
+        return self.scms((batch_size, max_seq_len, latent_dim), length, class_id, seq2seq_cond, seq2seq_mask, cls_free_guidance, l2_normalize, steps=steps)
+
     def forward(self, txt_latent, mask, class_id, seq2seq_cond=None, seq2seq_mask=None, return_x_start=False, k=1, *args, **kwargs):
         self.target_model.eval()
         self.diffusion_model.eval()
@@ -214,7 +243,7 @@ class ConsistencyDistillation(nn.Module):
         assert l == max_seq_len, f'length must be {max_seq_len}'
 
         #raw times
-        raw_time_n = torch.randint(0,self.diffusion_model.sampling_timesteps-k, (batch,), device=device).float()
+        raw_time_n = torch.randint(0,self.diffusion_model.sampling_timesteps-k+1, (batch,), device=device).float() #should this be -k+1
         raw_time_nk = raw_time_n + k
 
         #scaled_times
@@ -230,7 +259,7 @@ class ConsistencyDistillation(nn.Module):
 
         z_nk = alpha_nk.sqrt()*txt_latent + (1-alpha_nk).sqrt()*noise
         with torch.no_grad():
-            z_psi_n = self.diffusion_model.diffusion_model_predictions(z_t=z_nk, mask=mask, t=time_nk ,class_id=class_id, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask)
+            z_psi_n = self.diffusion_model.diffusion_model_predictions(z_t=z_nk, mask=mask, t=time_nk ,class_id=class_id, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask).pred_x_start
 
         #class conditioning
         if self.diffusion_model.diffusion_model.class_conditional and self.diffusion_model.diffusion_model.class_unconditional_prob > 0:
@@ -379,7 +408,7 @@ class Trainer(object):
             data = torch.load(os.path.join(args.latent_model_path, 'model.pt'), map_location=device)
             self.bart_model.load_state_dict(data['model'])
             diffusion_data = torch.load(os.path.join(args.diffusion_model_path, 'model.pt'), map_location=device)
-            self.consistency.diffusion_model.load_state_dict(data['model'])
+            self.consistency.diffusion_model.load_state_dict(diffusion_data['model'])
             if init_models:
                 for online_param, target_param, diffusion_param in zip(self.consistency.online_model.parameters(), self.consistency.target_model.parameters(), self.consistency.diffusion_model.parameters()):
                     online_param.data.copy_(diffusion_param.clone().detach())

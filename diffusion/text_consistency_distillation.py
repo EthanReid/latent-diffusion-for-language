@@ -186,6 +186,7 @@ class ConsistencyDistillation(nn.Module):
     def consistency_model_predictions(self, z_t, mask, t, z_self_cond=None, class_id=None, seq2seq_cond=None, seq2seq_mask=None, sampling=False, cls_free_guidance=1.0, l2_normalize=False, online=True):
         time_to_alpha = self.diffusion_model.sampling_schedule if sampling else self.diffusion_model.train_schedule
         time_cond = time_to_alpha(t)
+        #time_cond = right_pad_dims_to(z_t, time_cond)# might not be needed
         model = self.online_model if online else self.target_model
         model_output = model(z_t, mask, time_cond, z_self_cond, class_id=class_id, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask)
         if cls_free_guidance!=1.0:
@@ -210,26 +211,28 @@ class ConsistencyDistillation(nn.Module):
         '''
         assert steps != 0
         batch, device = shape[0], next(self.online_model.parameters()).device
-        times = torch.linspace(1, 0,steps, device=device)
-        times = times.unsqueeze(0)
-        alphas = self.diffusion_model.sampling_schedule(times)
-        
+
         if not exists(z_t):
             z_t = torch.randn(shape, device=device)
         z_hat_0 = None
+
+        times = torch.linspace(1, 0,steps, device=device)
+        times = times.unsqueeze(0)
+        alphas = self.diffusion_model.sampling_schedule(times)
+        #alphas = right_pad_dims_to(z_t, alphas)
         
         if self.diffusion_model.using_latent_model:
             mask = torch.ones((shape[0], shape[1]), dtype=torch.bool, device=device)
         else:    
             mask = [[True]*length + [False]*(self.diffusion_model.max_seq_len-length) for length in lengths]
             mask = torch.tensor(mask, dtype=torch.bool, device=device)
-        
+        #TODO add z_hat_0 = self.consistency_model so that first step is conditioned on prep from start? This is how I do it in train?
         print("scms sample for {} steps".format(str(steps)))
         for i, (time, alpha) in enumerate(zip(times, alphas)):
             if i!=0:
                 noise = torch.randn_like(z_t)
-                z_t = alpha.sqrt()*z_t + (1-alpha).sqrt()*noise
-            z_hat_0 = self.consistency_model_predictions(z_t, mask, time, class_id=class_id, z_self_cond=z_hat_0, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask, sampling=True, cls_free_guidance=cls_free_guidance, l2_normalize=l2_normalize)
+                z_t = alpha.sqrt()*z_hat_0 + (1-alpha).sqrt()*noise
+            z_hat_0 = self.consistency_model_predictions(z_t, mask, time, class_id=class_id, z_self_cond=None, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask, sampling=True, cls_free_guidance=cls_free_guidance, l2_normalize=l2_normalize)
         return (z_hat_0, mask)
 
     def sample(self, batch_size, length, class_id=None, seq2seq_cond=None, seq2seq_mask=None, cls_free_guidance=1.0, l2_normalize=False, steps=1):
@@ -243,7 +246,7 @@ class ConsistencyDistillation(nn.Module):
         assert l == max_seq_len, f'length must be {max_seq_len}'
 
         #raw times
-        raw_time_n = torch.randint(0,self.diffusion_model.sampling_timesteps-k+1, (batch,), device=device).float() #should this be -k+1
+        raw_time_n = torch.randint(0,self.diffusion_model.sampling_timesteps-k+1, (batch,), device=device).float() #should this be -k+1, on local it is -k and works, is this the issue?
         raw_time_nk = raw_time_n + k
 
         #scaled_times
@@ -256,6 +259,7 @@ class ConsistencyDistillation(nn.Module):
         #alphas, currently only does linear sched
         #alpha_n = self.diffusion_model.train_schedule(time_n)
         alpha_nk = self.diffusion_model.train_schedule(time_nk)
+        alpha_nk = right_pad_dims_to(txt_latent, alpha_nk)
 
         z_nk = alpha_nk.sqrt()*txt_latent + (1-alpha_nk).sqrt()*noise
         with torch.no_grad():
@@ -270,6 +274,7 @@ class ConsistencyDistillation(nn.Module):
         #self conditioning
         z_hat_0_nk = None
         z_hat_0_n = None
+        """
         if self.diffusion_model.self_condition and (random.random() < self.diffusion_model.train_prob_self_cond):
             with torch.no_grad():
                 z_hat_0_nk = self.consistency_model_predictions(z_t=z_nk, mask=mask, t=time_nk, class_id=class_id, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask)
@@ -277,7 +282,7 @@ class ConsistencyDistillation(nn.Module):
                 if self.diffusion_model.l2_normalize:
                     z_hat_0_nk = F.normalize(z_hat_0_nk, dim=-1) * math.sqrt(z_hat_0_nk.shape[-1])
                     z_hat_0_n = F.normalize(z_hat_0_n, dim=-1) * math.sqrt(z_hat_0_n.shape[-1])
-        
+        """
         z_0_nk = self.consistency_model_predictions(z_t=z_nk, mask=mask, t=time_nk, z_self_cond=z_hat_0_nk, class_id=class_id, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask)
         with torch.no_grad():
             z_0_n = self.consistency_model_predictions(z_t=z_psi_n, mask=mask, t=time_n, z_self_cond=z_hat_0_n,class_id=class_id, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask, online=False)

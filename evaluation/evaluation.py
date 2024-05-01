@@ -8,7 +8,7 @@ import spacy
 import numpy as np
 import wandb
 
-def compute_perplexity(all_texts_list, model_id='gpt2-large', device="mps"):
+def compute_perplexity(all_texts_list, model_id='gpt2-large', device="cuda"):
     if device == "cuda":
         torch.cuda.empty_cache() 
     perplexity = load("perplexity", module_type="metric")

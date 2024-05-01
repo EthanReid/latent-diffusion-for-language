@@ -272,7 +272,7 @@ if __name__ == "__main__":
     parser.add_argument("--resume_dir", type=str, default=None)
     parser.add_argument("--latent_model_path", type=str, default=None)
     parser.add_argument("--init_path", type=str, default=None)
-    parser.add_argument("--device", type=str, default="mps")
+    parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--init_models", action="store_true", default=False)
     parser.add_argument("--diffusion_model_path", type=str, default=None)
     

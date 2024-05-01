@@ -236,7 +236,7 @@ class ConsistencyDistillation(nn.Module):
         max_seq_len, latent_dim = self.diffusion_model.max_seq_len, self.diffusion_model.latent_dim
         return self.scms((batch_size, max_seq_len, latent_dim), length, class_id, seq2seq_cond, seq2seq_mask, cls_free_guidance, l2_normalize, steps=steps)
 
-    def forward(self, txt_latent, mask, class_id, seq2seq_cond=None, seq2seq_mask=None, return_x_start=False, k=1, *args, **kwargs):
+    def forward(self, txt_latent, mask, class_id, seq2seq_cond=None, seq2seq_mask=None, return_x_start=False, k=10, *args, **kwargs):
         self.target_model.eval()
         self.diffusion_model.eval()
         batch, l, d, device, max_seq_len, = *txt_latent.shape, txt_latent.device, self.diffusion_model.max_seq_len
@@ -259,7 +259,8 @@ class ConsistencyDistillation(nn.Module):
 
         z_nk = alpha_nk.sqrt()*txt_latent + (1-alpha_nk).sqrt()*noise
         with torch.no_grad():
-            z_psi_n = self.diffusion_model.diffusion_model_predictions(z_t=z_nk, mask=mask, t=time_nk ,class_id=class_id, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask).pred_x_start
+            #z_psi_n = self.diffusion_model.diffusion_model_predictions(z_t=z_nk, mask=mask, t=time_nk ,class_id=class_id, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask).pred_x_start
+            z_psi_n = self.diffusion_model.ddpm_predictions(z_t=z_nk, mask=mask, t=time_nk ,class_id=class_id, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask, k=k)
 
         #class conditioning
         if self.diffusion_model.diffusion_model.class_conditional and self.diffusion_model.diffusion_model.class_unconditional_prob > 0:
@@ -573,7 +574,7 @@ class Trainer(object):
             
     #TODO   
     @torch.no_grad()
-    def sample(self, num_samples=None, class_id=None, seed=42, test=False, cls_free_guidance=1.0):
+    def sample(self, num_samples=None, class_id=None, seed=42, test=False, cls_free_guidance=1.0, steps=1):
         num_samples = default(num_samples, self.num_samples)
         accelerator = self.accelerator
         device = accelerator.device
@@ -621,7 +622,7 @@ class Trainer(object):
         while min([len(all_texts_lists[ele]) for ele in all_texts_lists]) < num_samples:
             batches = num_to_groups(num_samples-min([len(all_texts_lists[ele]) for ele in all_texts_lists]), max(self.eval_batch_size,self.train_batch_size))
             #consistency sample is not implemented!
-            model_outputs = list(map(lambda n: tuple(x.to('cpu') for x in self.consistency.sample(batch_size=n, length=self.length_categorical.sample((n,)), class_id=get_class_id(n), cls_free_guidance=cls_free_guidance)), batches))
+            model_outputs = list(map(lambda n: tuple(x.to('cpu') for x in self.consistency.sample(batch_size=n, length=self.length_categorical.sample((n,)), class_id=get_class_id(n), cls_free_guidance=cls_free_guidance, steps=steps)), batches))
             
             for (latents, mask) in model_outputs:
                 latents, mask = latents.to(device), mask.to(device)

@@ -164,13 +164,19 @@ class ConsistencyDistillation(nn.Module):
             online_model:DiffusionTransformer,
             target_model:DiffusionTransformer,
             diffusion_model:GaussianDiffusion,
-            loss_type:str = "l2"
+            loss_type:str = "l2",
+            k=1,
+            steps=1,
+            both_online=False
     ):
         super().__init__()
         self.online_model = online_model #init to diffusion weights
         self.target_model = target_model #need to insure that target and online are init with the same weights, this should happen is the caller function
         self.diffusion_model = diffusion_model
         self.loss_type = loss_type
+        self.k = k
+        self.steps = steps
+        self.both_online = both_online
     
     @property
     def loss_fn(self):
@@ -194,7 +200,7 @@ class ConsistencyDistillation(nn.Module):
                 unc_class_id = torch.full_like(class_id, fill_value=self.diffusion_model.diffusion_model.num_classes)
             else:
                 unc_class_id = None
-            unc_model_output = self.diffusion_model(z_t, mask, time_cond, z_self_cond, class_id=unc_class_id, seq2seq_cond=None, seq2seq_mask=None)
+            unc_model_output = model(z_t, mask, time_cond, z_self_cond, class_id=unc_class_id, seq2seq_cond=None, seq2seq_mask=None)
             model_output = model_output*cls_free_guidance + unc_model_output*(1-cls_free_guidance)
         if l2_normalize:
             assert sampling
@@ -215,10 +221,10 @@ class ConsistencyDistillation(nn.Module):
         if not exists(z_t):
             z_t = torch.randn(shape, device=device)
         z_hat_0 = None
-
+        
         times = torch.linspace(1, 0,steps, device=device)
-        times = times.unsqueeze(0)
-        alphas = self.diffusion_model.sampling_schedule(times)
+        #times = times.unsqueeze(0)
+        #alphas = self.diffusion_model.sampling_schedule(times)
         #alphas = right_pad_dims_to(z_t, alphas)
         
         if self.diffusion_model.using_latent_model:
@@ -228,18 +234,24 @@ class ConsistencyDistillation(nn.Module):
             mask = torch.tensor(mask, dtype=torch.bool, device=device)
         #TODO add z_hat_0 = self.consistency_model so that first step is conditioned on prep from start? This is how I do it in train?
         print("scms sample for {} steps".format(str(steps)))
-        for i, (time, alpha) in enumerate(zip(times, alphas)):
+        for i, time in enumerate(times):
+            time = time.unsqueeze(0)
+            alpha = self.diffusion_model.sampling_schedule(time)
             if i!=0:
                 noise = torch.randn_like(z_t)
                 z_t = alpha.sqrt()*z_hat_0 + (1-alpha).sqrt()*noise
             z_hat_0 = self.consistency_model_predictions(z_t, mask, time, class_id=class_id, z_self_cond=None, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask, sampling=True, cls_free_guidance=cls_free_guidance, l2_normalize=l2_normalize)
         return (z_hat_0, mask)
 
-    def sample(self, batch_size, length, class_id=None, seq2seq_cond=None, seq2seq_mask=None, cls_free_guidance=1.0, l2_normalize=False, steps=1):
+    def sample(self, batch_size, length, class_id=None, seq2seq_cond=None, seq2seq_mask=None, cls_free_guidance=1.0, l2_normalize=False, steps=None):
+        if steps == None:
+            steps = self.steps
         max_seq_len, latent_dim = self.diffusion_model.max_seq_len, self.diffusion_model.latent_dim
         return self.scms((batch_size, max_seq_len, latent_dim), length, class_id, seq2seq_cond, seq2seq_mask, cls_free_guidance, l2_normalize, steps=steps)
 
-    def forward(self, txt_latent, mask, class_id, seq2seq_cond=None, seq2seq_mask=None, return_x_start=False, k=1, *args, **kwargs):
+    def forward(self, txt_latent, mask, class_id, seq2seq_cond=None, seq2seq_mask=None, return_x_start=False, k=None, *args, **kwargs):
+        if k == None:
+            k = self.k
         self.target_model.eval()
         self.diffusion_model.eval()
         batch, l, d, device, max_seq_len, = *txt_latent.shape, txt_latent.device, self.diffusion_model.max_seq_len
@@ -263,8 +275,9 @@ class ConsistencyDistillation(nn.Module):
 
         z_nk = alpha_nk.sqrt()*txt_latent + (1-alpha_nk).sqrt()*noise
         with torch.no_grad():
-            z_psi_n = self.diffusion_model.diffusion_model_predictions(z_t=z_nk, mask=mask, t=time_nk ,class_id=class_id, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask).pred_x_start
-
+            #z_psi_n = self.diffusion_model.diffusion_model_predictions(z_t=z_nk, mask=mask, t=time_nk ,class_id=class_id, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask).pred_x_start
+            #z_psi_n = self.diffusion_model.ddpm_predictions(z_t=z_nk, mask=mask, t=time_nk ,class_id=class_id, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask, k=k)
+            z_psi_n = self.diffusion_model.k_predictions(z_t=z_nk, mask=mask, t=time_nk ,class_id=class_id, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask, k=k)
         #class conditioning
         if self.diffusion_model.diffusion_model.class_conditional and self.diffusion_model.diffusion_model.class_unconditional_prob > 0:
             assert exists(class_id)
@@ -285,7 +298,7 @@ class ConsistencyDistillation(nn.Module):
         """
         z_0_nk = self.consistency_model_predictions(z_t=z_nk, mask=mask, t=time_nk, z_self_cond=z_hat_0_nk, class_id=class_id, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask)
         with torch.no_grad():
-            z_0_n = self.consistency_model_predictions(z_t=z_psi_n, mask=mask, t=time_n, z_self_cond=z_hat_0_n,class_id=class_id, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask, online=False)
+            z_0_n = self.consistency_model_predictions(z_t=z_psi_n, mask=mask, t=time_n, z_self_cond=z_hat_0_n,class_id=class_id, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask, online=self.both_online)
 
         loss = self.loss_fn(z_0_nk,z_0_n, reduction="none")
         loss = rearrange([reduce(loss[i][:torch.sum(mask[i])], 'l d -> 1', 'mean') for i in range(txt_latent.shape[0])], 'b 1 -> b 1')
@@ -320,7 +333,8 @@ class Trainer(object):
         mixed_precision = 'no',
         decoding_loss = False,
         decoding_loss_weight = 1.0,
-        init_models = False
+        init_models = False,
+        default_models = False
     ):
         super().__init__()
 
@@ -375,6 +389,9 @@ class Trainer(object):
 
         self.enc_dec_model = args.enc_dec_model
 
+        self.k = args.k
+        self.steps = args.steps
+
         # Init Encoder-decoder model
         if 'bart' in args.enc_dec_model:
             self.bart_model = BartForConditionalGeneration.from_pretrained(args.enc_dec_model)
@@ -418,6 +435,9 @@ class Trainer(object):
                 for online_param, target_param, diffusion_param in zip(self.consistency.online_model.parameters(), self.consistency.target_model.parameters(), self.consistency.diffusion_model.parameters()):
                     online_param.data.copy_(diffusion_param.clone().detach())
                     target_param.data.copy_(diffusion_param.clone().detach())
+            elif default_models:
+                for online_param, target_param in zip(self.consistency.online_model.parameters(), self.consistency.target_model.parameters()):
+                    target_param.data.copy_(online_param.clone().detach())
             self.consistency.diffusion_model.max_seq_len = self.bart_model.num_encoder_latents
             self.num_encoder_latents = self.bart_model.num_encoder_latents
             self.consistency.diffusion_model.using_latent_model = True
@@ -578,7 +598,7 @@ class Trainer(object):
             
     #TODO   
     @torch.no_grad()
-    def sample(self, num_samples=None, class_id=None, seed=42, test=False, cls_free_guidance=1.0):
+    def sample(self, num_samples=None, class_id=None, seed=42, test=False, cls_free_guidance=1.0, steps=1):
         num_samples = default(num_samples, self.num_samples)
         accelerator = self.accelerator
         device = accelerator.device
@@ -626,7 +646,7 @@ class Trainer(object):
         while min([len(all_texts_lists[ele]) for ele in all_texts_lists]) < num_samples:
             batches = num_to_groups(num_samples-min([len(all_texts_lists[ele]) for ele in all_texts_lists]), max(self.eval_batch_size,self.train_batch_size))
             #consistency sample is not implemented!
-            model_outputs = list(map(lambda n: tuple(x.to('cpu') for x in self.consistency.sample(batch_size=n, length=self.length_categorical.sample((n,)), class_id=get_class_id(n), cls_free_guidance=cls_free_guidance)), batches))
+            model_outputs = list(map(lambda n: tuple(x.to('cpu') for x in self.consistency.sample(batch_size=n, length=self.length_categorical.sample((n,)), class_id=get_class_id(n), cls_free_guidance=cls_free_guidance, steps=steps)), batches))
             
             for (latents, mask) in model_outputs:
                 latents, mask = latents.to(device), mask.to(device)

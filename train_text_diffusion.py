@@ -230,7 +230,7 @@ if __name__ == "__main__":
     parser.add_argument("--resume_dir", type=str, default=None)
     parser.add_argument("--latent_model_path", type=str, default=None)
     parser.add_argument("--init_path", type=str, default=None)
-    parser.add_argument("--device", type=str, default="mps")
+    parser.add_argument("--device", type=str, default="cuda")
     
     args = parser.parse_args()
     assert not (args.eval and args.resume_training)

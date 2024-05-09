@@ -42,7 +42,7 @@ def main(args):
         heads = args.tx_dim//ATTN_HEAD_DIM,
         latent_dim = latent_dim,
         max_seq_len = args.max_seq_len,
-        self_condition = args.self_condition,
+        self_condition = False,#args.self_condition,
         scale_shift = args.scale_shift,
         dropout = 0 if args.disable_dropout else 0.1,
         class_conditional= args.class_conditional,
@@ -59,7 +59,7 @@ def main(args):
         heads = args.tx_dim//ATTN_HEAD_DIM,
         latent_dim = latent_dim,
         max_seq_len = args.max_seq_len,
-        self_condition = args.self_condition,
+        self_condition = False,#args.self_condition,
         scale_shift = args.scale_shift,
         dropout = 0 if args.disable_dropout else 0.1,
         class_conditional= args.class_conditional,
@@ -106,7 +106,11 @@ def main(args):
     consistencyDistillation = ConsistencyDistillation(
         online_model=online_model,
         target_model=target_model,
-        diffusion_model=diffusion
+        diffusion_model=diffusion,
+        loss_type = args.loss_type,
+        k = args.k,
+        steps = args.steps,
+        both_online=args.both_online
     )
 
     trainer = Trainer(
@@ -130,7 +134,8 @@ def main(args):
         results_folder = args.output_dir,
         amp = args.amp,
         mixed_precision = args.mixed_precision,
-        init_models=args.init_models
+        init_models=args.init_models,
+        default_models=args.default_models
     )
 
     if args.eval:
@@ -274,7 +279,12 @@ if __name__ == "__main__":
     parser.add_argument("--init_path", type=str, default=None)
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--init_models", action="store_true", default=False)
+    parser.add_argument("--default_models", action="store_true", default=False)
     parser.add_argument("--diffusion_model_path", type=str, default=None)
+    parser.add_argument("--k", type=int, default=1)
+    parser.add_argument("--steps", type=int, default=1)
+    parser.add_argument("--both_online", action="store_true", default=False)
+
     
     args = parser.parse_args()
     assert not (args.eval and args.resume_training)

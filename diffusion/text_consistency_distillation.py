@@ -212,6 +212,7 @@ class ConsistencyDistillation(nn.Module):
         batch, device = shape[0], next(self.online_model.parameters()).device
         times = torch.linspace(1, 0,steps, device=device)
         times = times.unsqueeze(0)
+        times = right_pad_dims_to(shape, times)
         alphas = self.diffusion_model.sampling_schedule(times)
         
         if not exists(z_t):
@@ -232,7 +233,7 @@ class ConsistencyDistillation(nn.Module):
             z_hat_0 = self.consistency_model_predictions(z_t, mask, time, class_id=class_id, z_self_cond=z_hat_0, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask, sampling=True, cls_free_guidance=cls_free_guidance, l2_normalize=l2_normalize)
         return (z_hat_0, mask)
 
-    def sample(self, batch_size, length, class_id=None, seq2seq_cond=None, seq2seq_mask=None, cls_free_guidance=1.0, l2_normalize=False, steps=1):
+    def sample(self, batch_size, length, class_id=None, seq2seq_cond=None, seq2seq_mask=None, cls_free_guidance=1.0, l2_normalize=False, steps=4):
         max_seq_len, latent_dim = self.diffusion_model.max_seq_len, self.diffusion_model.latent_dim
         return self.scms((batch_size, max_seq_len, latent_dim), length, class_id, seq2seq_cond, seq2seq_mask, cls_free_guidance, l2_normalize, steps=steps)
 
@@ -260,8 +261,8 @@ class ConsistencyDistillation(nn.Module):
         z_nk = alpha_nk.sqrt()*txt_latent + (1-alpha_nk).sqrt()*noise
         with torch.no_grad():
             #z_psi_n = self.diffusion_model.diffusion_model_predictions(z_t=z_nk, mask=mask, t=time_nk ,class_id=class_id, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask).pred_x_start
-            z_psi_n = self.diffusion_model.ddpm_predictions(z_t=z_nk, mask=mask, t=time_nk ,class_id=class_id, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask, k=k)
-
+            #z_psi_n = self.diffusion_model.ddpm_predictions(z_t=z_nk, mask=mask, t=time_nk ,class_id=class_id, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask, k=k)
+            z_psi_n = self.diffusion_model.k_predictions(z_t=z_nk, mask=mask, t=time_nk ,class_id=class_id, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask, k=k)
         #class conditioning
         if self.diffusion_model.diffusion_model.class_conditional and self.diffusion_model.diffusion_model.class_unconditional_prob > 0:
             assert exists(class_id)

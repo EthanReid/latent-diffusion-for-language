@@ -839,8 +839,8 @@ class Trainer(object):
             test_subset = self.dataset['test']['text'][:self.num_samples]
             self.reference_dict['reference/test_perplexity'] = evaluation.compute_perplexity(test_subset)
             for mauve_model_id in ["gpt2-large"]:
-                self.reference_dict[f'reference/{mauve_model_id}_train_test_mauve'], _ = evaluation.compute_mauve(train_subset, test_subset, mauve_model_id)
-                self.reference_dict[f'reference/{mauve_model_id}_train_train_mauve'], _ = evaluation.compute_mauve(train_subset, train_subset2, mauve_model_id)
+                self.reference_dict[f'reference/{mauve_model_id}_train_test_mauve'], _ = evaluation.compute_mauve(train_subset, test_subset, mauve_model_id, device=self.args.device)
+                self.reference_dict[f'reference/{mauve_model_id}_train_train_mauve'], _ = evaluation.compute_mauve(train_subset, train_subset2, mauve_model_id, device=self.args.device)
                 ngram_metrics = evaluation.compute_diversity(test_subset)
             for k, v in ngram_metrics.items():
                 self.reference_dict[f"reference/test_{k}"] = v
@@ -854,8 +854,8 @@ class Trainer(object):
         self.reference_dict['reference/train_perplexity'] = evaluation.compute_perplexity(train_subset)
         self.reference_dict['reference/val_perplexity'] = evaluation.compute_perplexity(val_subset)
         for mauve_model_id in ["gpt2-large"]:
-            self.reference_dict[f'reference/{mauve_model_id}_train_val_mauve'], _ = evaluation.compute_mauve(train_subset, val_subset, mauve_model_id)
-            self.reference_dict[f'reference/{mauve_model_id}_train_train_mauve'], _ = evaluation.compute_mauve(train_subset, train_subset2, mauve_model_id)
+            self.reference_dict[f'reference/{mauve_model_id}_train_val_mauve'], _ = evaluation.compute_mauve(train_subset, val_subset, mauve_model_id, device=self.args.device)
+            self.reference_dict[f'reference/{mauve_model_id}_train_train_mauve'], _ = evaluation.compute_mauve(train_subset, train_subset2, mauve_model_id, device=self.args.device)
         ngram_metrics = evaluation.compute_diversity(val_subset)
         for k, v in ngram_metrics.items():
             self.reference_dict[f"reference/val_{k}"] = v
@@ -964,7 +964,7 @@ class Trainer(object):
 
             for mauve_model_id in ["gpt2-large"]:
                 for key, reference_text in reference_texts.items():
-                    metrics[f"model/{strategy}/{mauve_model_id}_{class_id_prefix}{key}_mauve"], _ = evaluation.compute_mauve(all_texts_list, reference_text, mauve_model_id)
+                    metrics[f"model/{strategy}/{mauve_model_id}_{class_id_prefix}{key}_mauve"], _ = evaluation.compute_mauve(all_texts_list, reference_text, mauve_model_id, device=self.args.device)
 
         if len(self.reference_dict) == 0 or test:
             self.log_reference_metrics(test)
@@ -1322,6 +1322,8 @@ class Trainer(object):
                         if self.class_conditional:
                             for class_id in range(self.diffusion.diffusion_model.num_classes):
                                 self.sample(num_samples=100, class_id=class_id)
+                        self.save()
+                    elif self.step % self.args.save_every == 0:
                         self.save()
                         
                         self.diffusion.train() 

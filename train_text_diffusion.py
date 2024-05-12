@@ -231,6 +231,8 @@ if __name__ == "__main__":
     parser.add_argument("--latent_model_path", type=str, default=None)
     parser.add_argument("--init_path", type=str, default=None)
     parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument("--num_workers", type=int, default=4)
+    parser.add_argument("--save_every", type=int, default=1000)
     
     args = parser.parse_args()
     assert not (args.eval and args.resume_training)

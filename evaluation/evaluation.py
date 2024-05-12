@@ -61,7 +61,7 @@ def compute_memorization(all_texts_list, human_references, n=4):
 
     return duplicate/total
 
-def compute_mauve(all_texts_list, human_references, model_id, device="mps"):
+def compute_mauve(all_texts_list, human_references, model_id, device="cuda"):
     if device == "cuda":
         torch.cuda.empty_cache() 
     assert model_id == 'gpt2-large'

@@ -186,8 +186,21 @@ class ConsistencyDistillation(nn.Module):
             return F.mse_loss
         elif self.loss_type == 'smooth_l1':
             return F.smooth_l1_loss
+        elif self.loss_type == "ground_l2":
+            return self.ground_l2 
         else:
             raise ValueError(f'invalid loss type {self.loss_type}')
+    '''
+    def ground_l2(self,input, target, ground_truth):
+        #g_input =  F.mse_loss(input, ground_truth,reduction="none")
+        #g_target = F.mse_loss(target, ground_truth, reduction="none")
+        pred = (input+target)/2
+        return F.mse_loss(pred, ground_truth, reduction="none")
+    '''
+    def ground_l2(self,input, target, ground_truth):
+        pred = input*target
+        g_pred = ground_truth*ground_truth
+        return F.mse_loss(pred, g_pred, reduction="none")
     
     def consistency_model_predictions(self, z_t, mask, t, z_self_cond=None, class_id=None, seq2seq_cond=None, seq2seq_mask=None, sampling=False, cls_free_guidance=1.0, l2_normalize=False, online=True):
         time_to_alpha = self.diffusion_model.sampling_schedule if sampling else self.diffusion_model.train_schedule
@@ -300,7 +313,8 @@ class ConsistencyDistillation(nn.Module):
         with torch.no_grad():
             z_0_n = self.consistency_model_predictions(z_t=z_psi_n, mask=mask, t=time_n, z_self_cond=z_hat_0_n,class_id=class_id, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask, online=self.both_online)
 
-        loss = self.loss_fn(z_0_nk,z_0_n, reduction="none")
+        #loss = self.loss_fn(z_0_nk,z_0_n, reduction="none") #TODO: cleanup passing of reduction
+        loss = self.loss_fn(z_0_nk,z_0_n,txt_latent)
         loss = rearrange([reduce(loss[i][:torch.sum(mask[i])], 'l d -> 1', 'mean') for i in range(txt_latent.shape[0])], 'b 1 -> b 1')
         
         return loss.mean()

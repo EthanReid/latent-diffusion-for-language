@@ -204,7 +204,7 @@ if __name__ == "__main__":
         "--loss_type",
         type=str,
         default="l2",
-        choices=["l1", "l2", "smooth_l1"],
+        choices=["l1", "l2", "smooth_l1", "ground_l2"],
         help=(
             "Which loss function to use for diffusion."
         ),

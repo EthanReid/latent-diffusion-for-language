@@ -144,7 +144,7 @@ def time_to_alpha(t, alpha_schedule, scale):
 def set_seeds(seed):
     random.seed(seed)
     torch.manual_seed(seed)
-    #torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
 
 def scalings_for_boundary_conditions(timestep, sigma_data=0.5, timestep_scaling=10.0):
     c_skip = sigma_data**2 / ((timestep / 0.1) ** 2 + sigma_data**2)
@@ -167,7 +167,8 @@ class ConsistencyDistillation(nn.Module):
             loss_type:str = "l2",
             k=1,
             steps=1,
-            both_online=False
+            both_online=False,
+            is_consistency_distillation=False
     ):
         super().__init__()
         self.online_model = online_model #init to diffusion weights
@@ -177,6 +178,8 @@ class ConsistencyDistillation(nn.Module):
         self.k = k
         self.steps = steps
         self.both_online = both_online
+        self.is_consistency_distillation = is_consistency_distillation
+        self.forward = self.forward_cd if is_consistency_distillation else self.forward_ct
     
     @property
     def loss_fn(self):
@@ -239,8 +242,8 @@ class ConsistencyDistillation(nn.Module):
             alpha = self.diffusion_model.sampling_schedule(time)
             if i!=0:
                 noise = torch.randn_like(z_t)
-                z_t = alpha.sqrt()*z_hat_0 + (1-alpha).sqrt()*noise
-            z_hat_0 = self.consistency_model_predictions(z_t, mask, time, class_id=class_id, z_self_cond=None, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask, sampling=True, cls_free_guidance=cls_free_guidance, l2_normalize=l2_normalize)
+                z_t = z_hat_0 + math.sqrt(max((alpha)**2 -(1e-9 **2),0))*noise
+            z_hat_0 = self.consistency_model_predictions(z_t, mask, time, class_id=class_id, z_self_cond=None, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask, sampling=True, cls_free_guidance=cls_free_guidance, l2_normalize=l2_normalize)   
         return (z_hat_0, mask)
 
     def sample(self, batch_size, length, class_id=None, seq2seq_cond=None, seq2seq_mask=None, cls_free_guidance=1.0, l2_normalize=False, steps=None):
@@ -249,7 +252,50 @@ class ConsistencyDistillation(nn.Module):
         max_seq_len, latent_dim = self.diffusion_model.max_seq_len, self.diffusion_model.latent_dim
         return self.scms((batch_size, max_seq_len, latent_dim), length, class_id, seq2seq_cond, seq2seq_mask, cls_free_guidance, l2_normalize, steps=steps)
 
-    def forward(self, txt_latent, mask, class_id, seq2seq_cond=None, seq2seq_mask=None, return_x_start=False, k=None, *args, **kwargs):
+    def forward_ct(self, txt_latent, mask, class_id, seq2seq_cond=None, seq2seq_mask=None, return_x_start=False, k=None, *args, **kwargs):
+        if k == None:
+            k = self.k
+        k = np.random.randint(1,k+1)
+        self.target_model.eval()
+        self.diffusion_model.eval()
+        batch, l, d, device, max_seq_len, = *txt_latent.shape, txt_latent.device, self.diffusion_model.max_seq_len
+        assert l == max_seq_len, f'length must be {max_seq_len}'
+
+        #raw times
+        raw_time_n = torch.randint(0,self.diffusion_model.sampling_timesteps-k+1, (batch,), device=device).float() #should this be -k+1, on local it is -k and works, is this the issue?
+        raw_time_nk = raw_time_n + k
+
+        #scaled_times
+        time_n = raw_time_n/self.diffusion_model.sampling_timesteps
+        time_nk = raw_time_nk/self.diffusion_model.sampling_timesteps
+
+        #gaussian noise to be added to latent
+        noise = torch.randn_like(txt_latent)
+
+        #alphas, currently only does linear sched
+        alpha_n = self.diffusion_model.train_schedule(time_n)
+        alpha_n = right_pad_dims_to(txt_latent, alpha_n)
+        alpha_nk = self.diffusion_model.train_schedule(time_nk)
+        alpha_nk = right_pad_dims_to(txt_latent, alpha_nk)
+
+        z_n = alpha_n.sqrt()*txt_latent + (1-alpha_n).sqrt()*noise
+        z_nk = alpha_nk.sqrt()*txt_latent + (1-alpha_nk).sqrt()*noise
+
+        if self.diffusion_model.diffusion_model.class_conditional and self.diffusion_model.diffusion_model.class_unconditional_prob > 0:
+            assert exists(class_id)
+            class_unconditional_mask = self.diffusion_model.class_unconditional_bernoulli.sample(class_id.shape).bool()
+            class_id[class_unconditional_mask] = self.diffusion_model.diffusion_model.num_classes
+        
+        z_0_nk = self.consistency_model_predictions(z_t=z_nk, mask=mask, t=time_nk, z_self_cond=None, class_id=class_id, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask)
+        with torch.no_grad():
+            z_0_n = self.consistency_model_predictions(z_t=z_n, mask=mask, t=time_n, z_self_cond=None,class_id=class_id, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask, online=self.both_online)
+
+        loss = self.loss_fn(z_0_nk,z_0_n, reduction="none")
+        loss = rearrange([reduce(loss[i][:torch.sum(mask[i])], 'l d -> 1', 'mean') for i in range(txt_latent.shape[0])], 'b 1 -> b 1')
+        
+        return loss.mean()
+
+    def forward_cd(self, txt_latent, mask, class_id, seq2seq_cond=None, seq2seq_mask=None, return_x_start=False, k=None, *args, **kwargs):
         if k == None:
             k = self.k
         self.target_model.eval()
@@ -338,8 +384,8 @@ class Trainer(object):
     ):
         super().__init__()
 
-
-        set_seeds(42)
+        self.seed = 42
+        set_seeds(self.seed)
 
         self.args = args
 
@@ -454,7 +500,7 @@ class Trainer(object):
         self.dataset_name = dataset_name
         dataset = text_dataset.get_dataset(dataset_name,)
 
-        self.dataset = dataset.shuffle(seed=42)
+        self.dataset = dataset.shuffle(seed=self.seed)
         if args.eval_test:
             self.num_samples = min(self.num_samples,len(self.dataset['test']))
             print(f'Using {self.num_samples} samples for evaluation')
@@ -598,12 +644,14 @@ class Trainer(object):
             
     #TODO   
     @torch.no_grad()
-    def sample(self, num_samples=None, class_id=None, seed=42, test=False, cls_free_guidance=1.0, steps=1):
+    def sample(self, num_samples=None, class_id=None, seed=42, test=False, cls_free_guidance=1.0, steps=None):
         num_samples = default(num_samples, self.num_samples)
         accelerator = self.accelerator
         device = accelerator.device
         if self.accelerator.device == "cuda":
             torch.cuda.empty_cache() 
+        if steps == None:
+            steps = self.args.steps
 
         self.consistency.eval()
 

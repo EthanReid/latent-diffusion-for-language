@@ -340,11 +340,17 @@ class GaussianDiffusion(nn.Module):
             z_t = 1/alpha_now.sqrt() * (z_t - (1-alpha_now)/(1-alpha).sqrt() * eps) + torch.sqrt(1 - alpha_now) * noise
         return z_t
     
+    #TODO: this is wrong, DO NOT USE pred_x_start
     def k_predictions(self, z_t, mask, t, *, k=1, x_self_cond = None,  class_id=None, seq2seq_cond=None, seq2seq_mask=None, sampling=False, cls_free_guidance=1.0, l2_normalize=False):
         raw_time = t*self.sampling_timesteps
         for i in range(k):
             time = (raw_time-i)/self.sampling_timesteps
-            z_t = self.diffusion_model_predictions(z_t, mask, time, class_id=class_id, x_self_cond=x_self_cond, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask, sampling=True, cls_free_guidance=cls_free_guidance, l2_normalize=l2_normalize).pred_x_start
+            model_output = self.diffusion_model_predictions(z_t, mask, time, class_id=class_id, x_self_cond=x_self_cond, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask, sampling=True, cls_free_guidance=cls_free_guidance, l2_normalize=l2_normalize)
+            alpha = self.train_schedule(time)
+            alpha = right_pad_dims_to(z_t, alpha)
+            eps = model_output.pred_noise
+            noise = torch.randn_like(z_t)
+            z_t = 1/alpha.sqrt() * (z_t - ((1-alpha)/(1-alpha).sqrt()) * eps) + (alpha * noise)
         return z_t
 
     def get_sampling_timesteps(self, batch, *, device, invert = False):

@@ -110,7 +110,8 @@ def main(args):
         loss_type = args.loss_type,
         k = args.k,
         steps = args.steps,
-        both_online=args.both_online
+        both_online=args.both_online,
+        is_consistency_distillation=args.is_cd
     )
 
     trainer = Trainer(
@@ -139,11 +140,8 @@ def main(args):
     )
 
     if args.eval:
-        trainer.load(args.resume_dir, best=trainer.diffusion.diffusion_model.seq2seq)
-        if trainer.diffusion.diffusion_model.seq2seq:
-            trainer.sample_seq2seq(cls_free_guidance=2.0, incremental=False)
-        else:
-            trainer.sample()
+        trainer.load(args.resume_dir)
+        trainer.sample(steps=args.steps)
         if args.class_conditional:
             for class_id in range(diffusion.num_classes):
                 trainer.sample(class_id=class_id)
@@ -284,6 +282,7 @@ if __name__ == "__main__":
     parser.add_argument("--k", type=int, default=1)
     parser.add_argument("--steps", type=int, default=1)
     parser.add_argument("--both_online", action="store_true", default=False)
+    parser.add_argument("--is_cd", action="store_true", default=False)
 
     
     args = parser.parse_args()
@@ -296,7 +295,7 @@ if __name__ == "__main__":
             saved_args = json.load(f)
         args_dict = vars(args)
         # Hold out sampling/evaluation parameters
-        heldout_params = {'wandb_name', 'output_dir', 'resume_dir', 'eval', 'eval_test', 'num_samples', 'sampling_timesteps', 'sampling_schedule', 'seq2seq_candidates', 'scale', 'sampler', 'resume_training'}
+        heldout_params = {'wandb_name', 'output_dir', 'resume_dir', 'eval', 'eval_test', 'num_samples', 'sampling_timesteps', 'sampling_schedule', 'seq2seq_candidates', 'scale', 'sampler', 'resume_training', 'steps', 'k'}
         # Overwrite args with saved args
         for k,v in saved_args.items():
             if k in heldout_params:

@@ -284,6 +284,7 @@ if __name__ == "__main__":
     parser.add_argument("--k", type=int, default=1)
     parser.add_argument("--steps", type=int, default=1)
     parser.add_argument("--both_online", action="store_true", default=False)
+    parser.add_argument("--num_workers", type=int, default=4)
 
     
     args = parser.parse_args()

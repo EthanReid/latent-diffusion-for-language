@@ -282,10 +282,10 @@ class Trainer(object):
             # Compute perplexity
 
             if all(pred_text[strategy]):
-                metrics[f'autoencoder/{strategy}/perplexity'] = evaluation.compute_perplexity(pred_text[strategy])
+                metrics[f'autoencoder/{strategy}/perplexity'] = evaluation.compute_perplexity(pred_text[strategy], device=self.args.device)
 
             if all(bart_text[strategy]):
-                metrics[f'bart/{strategy}/perplexity'] = evaluation.compute_perplexity(bart_text[strategy])
+                metrics[f'bart/{strategy}/perplexity'] = evaluation.compute_perplexity(bart_text[strategy], device=self.args.device)
 
             rouge_metrics = evaluation.compute_rouge(pred_text[strategy], ref_text)
             for k,v in rouge_metrics.items():
@@ -293,7 +293,7 @@ class Trainer(object):
             rouge_metrics = evaluation.compute_rouge(bart_text[strategy], ref_text)
             for k,v in rouge_metrics.items():
                 metrics[f'bart/{strategy}/{k}'] = v
-        metrics['reference/perplexity'] = evaluation.compute_perplexity(ref_text)
+        metrics['reference/perplexity'] = evaluation.compute_perplexity(ref_text, device=self.args.device)
          
 
         accelerator.log(metrics, self.step)

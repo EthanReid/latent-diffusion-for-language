@@ -837,7 +837,7 @@ class Trainer(object):
             train_subset = self.dataset['train']['text'][:self.num_samples]
             train_subset2 = self.dataset['train']['text'][self.num_samples:(2*self.num_samples)] 
             test_subset = self.dataset['test']['text'][:self.num_samples]
-            self.reference_dict['reference/test_perplexity'] = evaluation.compute_perplexity(test_subset)
+            self.reference_dict['reference/test_perplexity'] = evaluation.compute_perplexity(test_subset, device=self.args.device)
             for mauve_model_id in ["gpt2-large"]:
                 self.reference_dict[f'reference/{mauve_model_id}_train_test_mauve'], _ = evaluation.compute_mauve(train_subset, test_subset, mauve_model_id)
                 self.reference_dict[f'reference/{mauve_model_id}_train_train_mauve'], _ = evaluation.compute_mauve(train_subset, train_subset2, mauve_model_id)
@@ -851,8 +851,8 @@ class Trainer(object):
         val_subset = self.dataset['valid']['text'][:self.num_samples]
         train_subset = self.dataset['train']['text'][:self.num_samples]
         train_subset2 = self.dataset['train']['text'][self.num_samples:(2*self.num_samples)] 
-        self.reference_dict['reference/train_perplexity'] = evaluation.compute_perplexity(train_subset)
-        self.reference_dict['reference/val_perplexity'] = evaluation.compute_perplexity(val_subset)
+        self.reference_dict['reference/train_perplexity'] = evaluation.compute_perplexity(train_subset, device=self.args.device)
+        self.reference_dict['reference/val_perplexity'] = evaluation.compute_perplexity(val_subset, device=self.args.device)
         for mauve_model_id in ["gpt2-large"]:
             self.reference_dict[f'reference/{mauve_model_id}_train_val_mauve'], _ = evaluation.compute_mauve(train_subset, val_subset, mauve_model_id)
             self.reference_dict[f'reference/{mauve_model_id}_train_train_mauve'], _ = evaluation.compute_mauve(train_subset, train_subset2, mauve_model_id)
@@ -948,7 +948,7 @@ class Trainer(object):
         for strategy, all_texts_list in text_generations.items():
             class_id_prefix = f'cond{class_id}_' if exists(class_id) else ''
             file_utils.save_text_samples(all_texts_list, os.path.join(self.results_folder, f'{"eval-" if self.args.eval else ""}{f"eval{seed}-" if self.args.eval_test else ""}{class_id_prefix}{strategy}-sample-{milestone}.txt'))
-            metrics[f"model/{strategy}/{class_id_prefix}perplexity"] = evaluation.compute_perplexity(all_texts_list)
+            metrics[f"model/{strategy}/{class_id_prefix}perplexity"] = evaluation.compute_perplexity(all_texts_list, device=self.args.device)
             metrics[f"model/{strategy}/{class_id_prefix}unique_wordcount"] = evaluation.compute_wordcount(all_texts_list)
             ngram_metrics = evaluation.compute_diversity(all_texts_list)
             for k, v in ngram_metrics.items():
@@ -1166,7 +1166,7 @@ class Trainer(object):
             for k, v in shuffled_rouge_metrics.items():
                 metrics[f"model/seq2seq/{prefix}shuffled_{k}"] = v
 
-            metrics[f"model/seq2seq/{prefix}perplexity"] = evaluation.compute_perplexity(pred_texts)
+            metrics[f"model/seq2seq/{prefix}perplexity"] = evaluation.compute_perplexity(pred_texts, device=self.args.device)
             metrics[f"model/seq2seq/{prefix}unique_wordcount"] = evaluation.compute_wordcount(pred_texts)
             ngram_metrics = evaluation.compute_diversity(pred_texts)
             for k, v in ngram_metrics.items():

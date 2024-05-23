@@ -332,12 +332,27 @@ class GaussianDiffusion(nn.Module):
             x_start = model_output.pred_x_start
             eps = model_output.pred_noise
 
-            if (i==k-1) or (time_next[0]==0):
+            if (time_next[0]==0):
                 z_t = x_start
                 continue
 
             noise = torch.randn_like(z_t)
             z_t = 1/alpha_now.sqrt() * (z_t - (1-alpha_now)/(1-alpha).sqrt() * eps) + torch.sqrt(1 - alpha_now) * noise
+        return z_t
+    def ddim_predictions(self, z_t, mask, t, *, k=1, x_self_cond = None,  class_id=None, seq2seq_cond=None, seq2seq_mask=None, sampling=False, cls_free_guidance=1.0, l2_normalize=False):
+        raw_time = t*self.sampling_timesteps
+        raw_time_next = (t*self.sampling_timesteps)-k
+        time = (raw_time)/self.sampling_timesteps
+        time_next = (raw_time_next)/self.sampling_timesteps
+        model_output = self.diffusion_model_predictions(z_t, mask, time, class_id=class_id, x_self_cond=x_self_cond, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask, sampling=True, cls_free_guidance=cls_free_guidance, l2_normalize=l2_normalize)
+        alpha = self.train_schedule(time)
+        alpha_next = self.train_schedule(time_next)
+        alpha, alpha_next = map(partial(right_pad_dims_to, z_t),(alpha,alpha_next))
+        alpha_now = alpha/alpha_next
+        x_start = model_output.pred_x_start
+        eps = model_output.pred_noise
+        noise = torch.randn_like(z_t)
+        z_t = x_start * alpha_next.sqrt() + eps * (1-alpha_next).sqrt()
         return z_t
     
     #TODO: this is wrong, DO NOT USE pred_x_start

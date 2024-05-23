@@ -189,8 +189,16 @@ class ConsistencyDistillation(nn.Module):
             return F.mse_loss
         elif self.loss_type == 'smooth_l1':
             return F.smooth_l1_loss
+        elif self.loss_type == 'ground_l2':
+            return ConsistencyDistillation.ground_l2
         else:
             raise ValueError(f'invalid loss type {self.loss_type}')
+    
+    def ground_l2(online_out, teacher_out, ground_truth, theta=1e-3):
+        consistency_loss = F.mse_loss(online_out, teacher_out, reduction="none")
+        ground_loss = F.mse_loss(online_out, ground_truth, reduction="none")
+        return consistency_loss+(theta*ground_loss)
+    
     
     def consistency_model_predictions(self, z_t, mask, t, z_self_cond=None, class_id=None, seq2seq_cond=None, seq2seq_mask=None, sampling=False, cls_free_guidance=1.0, l2_normalize=False, online=True):
         time_to_alpha = self.diffusion_model.sampling_schedule if sampling else self.diffusion_model.train_schedule
@@ -208,7 +216,7 @@ class ConsistencyDistillation(nn.Module):
         if l2_normalize:
             assert sampling
             model_output = F.normalize(model_output, dim=-1) * math.sqrt(model_output.shape[-1])
-        
+        #pred x_0 with model out:
         c_skip, c_out = scalings_for_boundary_conditions(t)
         c_skip, c_out = [append_dims(x, z_t.ndim) for x in [c_skip, c_out]]
         model_output = c_skip*z_t + c_out*model_output
@@ -255,7 +263,7 @@ class ConsistencyDistillation(nn.Module):
     def forward_ct(self, txt_latent, mask, class_id, seq2seq_cond=None, seq2seq_mask=None, return_x_start=False, k=None, *args, **kwargs):
         if k == None:
             k = self.k
-        k = np.random.randint(1,k+1)
+        #k = np.random.randint(1,k+1)
         self.target_model.eval()
         self.diffusion_model.eval()
         batch, l, d, device, max_seq_len, = *txt_latent.shape, txt_latent.device, self.diffusion_model.max_seq_len
@@ -289,8 +297,9 @@ class ConsistencyDistillation(nn.Module):
         z_0_nk = self.consistency_model_predictions(z_t=z_nk, mask=mask, t=time_nk, z_self_cond=None, class_id=class_id, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask)
         with torch.no_grad():
             z_0_n = self.consistency_model_predictions(z_t=z_n, mask=mask, t=time_n, z_self_cond=None,class_id=class_id, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask, online=self.both_online)
-
-        loss = self.loss_fn(z_0_nk,z_0_n, reduction="none")
+        #TODO: add if for ground_l2
+        #loss = self.loss_fn(z_0_nk,z_0_n, reduction="none")
+        loss = self.loss_fn(z_0_nk,z_0_n, txt_latent, theta=5e-1)
         loss = rearrange([reduce(loss[i][:torch.sum(mask[i])], 'l d -> 1', 'mean') for i in range(txt_latent.shape[0])], 'b 1 -> b 1')
         
         return loss.mean()
@@ -298,6 +307,7 @@ class ConsistencyDistillation(nn.Module):
     def forward_cd(self, txt_latent, mask, class_id, seq2seq_cond=None, seq2seq_mask=None, return_x_start=False, k=None, *args, **kwargs):
         if k == None:
             k = self.k
+        k = np.random.randint(1,k+1)
         self.target_model.eval()
         self.diffusion_model.eval()
         batch, l, d, device, max_seq_len, = *txt_latent.shape, txt_latent.device, self.diffusion_model.max_seq_len
@@ -323,7 +333,8 @@ class ConsistencyDistillation(nn.Module):
         with torch.no_grad():
             #z_psi_n = self.diffusion_model.diffusion_model_predictions(z_t=z_nk, mask=mask, t=time_nk ,class_id=class_id, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask).pred_x_start
             #z_psi_n = self.diffusion_model.ddpm_predictions(z_t=z_nk, mask=mask, t=time_nk ,class_id=class_id, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask, k=k)
-            z_psi_n = self.diffusion_model.k_predictions(z_t=z_nk, mask=mask, t=time_nk ,class_id=class_id, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask, k=k)
+            z_psi_n = self.diffusion_model.ddim_predictions(z_t=z_nk, mask=mask, t=time_nk ,class_id=class_id, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask, k=k)
+            #z_psi_n = self.diffusion_model.k_predictions(z_t=z_nk, mask=mask, t=time_nk ,class_id=class_id, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask, k=k)
         #class conditioning
         if self.diffusion_model.diffusion_model.class_conditional and self.diffusion_model.diffusion_model.class_unconditional_prob > 0:
             assert exists(class_id)

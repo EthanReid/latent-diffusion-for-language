@@ -202,7 +202,7 @@ if __name__ == "__main__":
         "--loss_type",
         type=str,
         default="l2",
-        choices=["l1", "l2", "smooth_l1"],
+        choices=["l1", "l2", "smooth_l1", "ground_l2"],
         help=(
             "Which loss function to use for diffusion."
         ),
@@ -295,7 +295,7 @@ if __name__ == "__main__":
             saved_args = json.load(f)
         args_dict = vars(args)
         # Hold out sampling/evaluation parameters
-        heldout_params = {'wandb_name', 'output_dir', 'resume_dir', 'eval', 'eval_test', 'num_samples', 'sampling_timesteps', 'sampling_schedule', 'seq2seq_candidates', 'scale', 'sampler', 'resume_training', 'steps', 'k'}
+        heldout_params = {'wandb_name', 'output_dir', 'resume_dir', 'eval', 'eval_test', 'num_samples', 'sampling_timesteps', 'sampling_schedule', 'seq2seq_candidates', 'scale', 'sampler', 'resume_training', 'steps', 'k', 'loss_type', 'save_and_sample_every', 'learning_rate'}
         # Overwrite args with saved args
         for k,v in saved_args.items():
             if k in heldout_params:

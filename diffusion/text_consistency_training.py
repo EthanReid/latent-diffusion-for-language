@@ -144,7 +144,7 @@ def time_to_alpha(t, alpha_schedule, scale):
 def set_seeds(seed):
     random.seed(seed)
     torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
+    #torch.cuda.manual_seed(seed)
 
 def scalings_for_boundary_conditions(timestep, sigma_data=0.5, timestep_scaling=10.0):
     c_skip = sigma_data**2 / ((timestep / 0.1) ** 2 + sigma_data**2)
@@ -158,7 +158,7 @@ def append_dims(x, target_dims):
         raise ValueError(f"input has {x.ndim} dims but target_dims is {target_dims}, which is less")
     return x[(...,) + (None,) * dims_to_append]
 
-class ConsistencyDistillation(nn.Module):
+class ConsistencyTraining(nn.Module):
     def __init__(
             self,
             online_model:DiffusionTransformer,
@@ -167,8 +167,7 @@ class ConsistencyDistillation(nn.Module):
             loss_type:str = "l2",
             k=1,
             steps=1,
-            both_online=False,
-            is_consistency_distillation=False
+            both_online=False
     ):
         super().__init__()
         self.online_model = online_model #init to diffusion weights
@@ -178,8 +177,6 @@ class ConsistencyDistillation(nn.Module):
         self.k = k
         self.steps = steps
         self.both_online = both_online
-        self.is_consistency_distillation = is_consistency_distillation
-        self.forward = self.forward_cd if is_consistency_distillation else self.forward_ct
     
     @property
     def loss_fn(self):
@@ -189,16 +186,8 @@ class ConsistencyDistillation(nn.Module):
             return F.mse_loss
         elif self.loss_type == 'smooth_l1':
             return F.smooth_l1_loss
-        elif self.loss_type == 'ground_l2':
-            return ConsistencyDistillation.ground_l2
         else:
             raise ValueError(f'invalid loss type {self.loss_type}')
-    
-    def ground_l2(online_out, teacher_out, ground_truth, theta=1e-3):
-        consistency_loss = F.mse_loss(online_out, teacher_out, reduction="none")
-        ground_loss = F.mse_loss(online_out, ground_truth, reduction="none")
-        return consistency_loss+(theta*ground_loss)
-    
     
     def consistency_model_predictions(self, z_t, mask, t, z_self_cond=None, class_id=None, seq2seq_cond=None, seq2seq_mask=None, sampling=False, cls_free_guidance=1.0, l2_normalize=False, online=True):
         time_to_alpha = self.diffusion_model.sampling_schedule if sampling else self.diffusion_model.train_schedule
@@ -216,7 +205,7 @@ class ConsistencyDistillation(nn.Module):
         if l2_normalize:
             assert sampling
             model_output = F.normalize(model_output, dim=-1) * math.sqrt(model_output.shape[-1])
-        #pred x_0 with model out:
+        
         c_skip, c_out = scalings_for_boundary_conditions(t)
         c_skip, c_out = [append_dims(x, z_t.ndim) for x in [c_skip, c_out]]
         model_output = c_skip*z_t + c_out*model_output
@@ -250,8 +239,8 @@ class ConsistencyDistillation(nn.Module):
             alpha = self.diffusion_model.sampling_schedule(time)
             if i!=0:
                 noise = torch.randn_like(z_t)
-                z_t = z_hat_0 + math.sqrt(max((alpha)**2 -(1e-9 **2),0))*noise
-            z_hat_0 = self.consistency_model_predictions(z_t, mask, time, class_id=class_id, z_self_cond=None, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask, sampling=True, cls_free_guidance=cls_free_guidance, l2_normalize=l2_normalize)   
+                z_t = alpha.sqrt()*z_hat_0 + (1-alpha).sqrt()*noise
+            z_hat_0 = self.consistency_model_predictions(z_t, mask, time, class_id=class_id, z_self_cond=None, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask, sampling=True, cls_free_guidance=cls_free_guidance, l2_normalize=l2_normalize)
         return (z_hat_0, mask)
 
     def sample(self, batch_size, length, class_id=None, seq2seq_cond=None, seq2seq_mask=None, cls_free_guidance=1.0, l2_normalize=False, steps=None):
@@ -260,54 +249,9 @@ class ConsistencyDistillation(nn.Module):
         max_seq_len, latent_dim = self.diffusion_model.max_seq_len, self.diffusion_model.latent_dim
         return self.scms((batch_size, max_seq_len, latent_dim), length, class_id, seq2seq_cond, seq2seq_mask, cls_free_guidance, l2_normalize, steps=steps)
 
-    def forward_ct(self, txt_latent, mask, class_id, seq2seq_cond=None, seq2seq_mask=None, return_x_start=False, k=None, *args, **kwargs):
+    def forward(self, txt_latent, mask, class_id, seq2seq_cond=None, seq2seq_mask=None, return_x_start=False, k=None, *args, **kwargs):
         if k == None:
             k = self.k
-        #k = np.random.randint(1,k+1)
-        self.target_model.eval()
-        self.diffusion_model.eval()
-        batch, l, d, device, max_seq_len, = *txt_latent.shape, txt_latent.device, self.diffusion_model.max_seq_len
-        assert l == max_seq_len, f'length must be {max_seq_len}'
-
-        #raw times
-        raw_time_n = torch.randint(0,self.diffusion_model.sampling_timesteps-k+1, (batch,), device=device).float() #should this be -k+1, on local it is -k and works, is this the issue?
-        raw_time_nk = raw_time_n + k
-
-        #scaled_times
-        time_n = raw_time_n/self.diffusion_model.sampling_timesteps
-        time_nk = raw_time_nk/self.diffusion_model.sampling_timesteps
-
-        #gaussian noise to be added to latent
-        noise = torch.randn_like(txt_latent)
-
-        #alphas, currently only does linear sched
-        alpha_n = self.diffusion_model.train_schedule(time_n)
-        alpha_n = right_pad_dims_to(txt_latent, alpha_n)
-        alpha_nk = self.diffusion_model.train_schedule(time_nk)
-        alpha_nk = right_pad_dims_to(txt_latent, alpha_nk)
-
-        z_n = alpha_n.sqrt()*txt_latent + (1-alpha_n).sqrt()*noise
-        z_nk = alpha_nk.sqrt()*txt_latent + (1-alpha_nk).sqrt()*noise
-
-        if self.diffusion_model.diffusion_model.class_conditional and self.diffusion_model.diffusion_model.class_unconditional_prob > 0:
-            assert exists(class_id)
-            class_unconditional_mask = self.diffusion_model.class_unconditional_bernoulli.sample(class_id.shape).bool()
-            class_id[class_unconditional_mask] = self.diffusion_model.diffusion_model.num_classes
-        
-        z_0_nk = self.consistency_model_predictions(z_t=z_nk, mask=mask, t=time_nk, z_self_cond=None, class_id=class_id, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask)
-        with torch.no_grad():
-            z_0_n = self.consistency_model_predictions(z_t=z_n, mask=mask, t=time_n, z_self_cond=None,class_id=class_id, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask, online=self.both_online)
-        #TODO: add if for ground_l2
-        #loss = self.loss_fn(z_0_nk,z_0_n, reduction="none")
-        loss = self.loss_fn(z_0_nk,z_0_n, txt_latent, theta=5e-1)
-        loss = rearrange([reduce(loss[i][:torch.sum(mask[i])], 'l d -> 1', 'mean') for i in range(txt_latent.shape[0])], 'b 1 -> b 1')
-        
-        return loss.mean()
-
-    def forward_cd(self, txt_latent, mask, class_id, seq2seq_cond=None, seq2seq_mask=None, return_x_start=False, k=None, *args, **kwargs):
-        if k == None:
-            k = self.k
-        k = np.random.randint(1,k+1)
         self.target_model.eval()
         self.diffusion_model.eval()
         batch, l, d, device, max_seq_len, = *txt_latent.shape, txt_latent.device, self.diffusion_model.max_seq_len
@@ -333,8 +277,7 @@ class ConsistencyDistillation(nn.Module):
         with torch.no_grad():
             #z_psi_n = self.diffusion_model.diffusion_model_predictions(z_t=z_nk, mask=mask, t=time_nk ,class_id=class_id, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask).pred_x_start
             #z_psi_n = self.diffusion_model.ddpm_predictions(z_t=z_nk, mask=mask, t=time_nk ,class_id=class_id, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask, k=k)
-            z_psi_n = self.diffusion_model.ddim_predictions(z_t=z_nk, mask=mask, t=time_nk ,class_id=class_id, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask, k=k)
-            #z_psi_n = self.diffusion_model.k_predictions(z_t=z_nk, mask=mask, t=time_nk ,class_id=class_id, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask, k=k)
+            z_psi_n = self.diffusion_model.k_predictions(z_t=z_nk, mask=mask, t=time_nk ,class_id=class_id, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask, k=k)
         #class conditioning
         if self.diffusion_model.diffusion_model.class_conditional and self.diffusion_model.diffusion_model.class_unconditional_prob > 0:
             assert exists(class_id)
@@ -366,7 +309,7 @@ class Trainer(object):
     def __init__(
         self,
         args,
-        consistency:ConsistencyDistillation,
+        consistency:ConsistencyTraining,
         dataset_name,
         *,
         train_batch_size = 16,
@@ -395,8 +338,8 @@ class Trainer(object):
     ):
         super().__init__()
 
-        self.seed = 42
-        set_seeds(self.seed)
+
+        set_seeds(42)
 
         self.args = args
 
@@ -511,7 +454,7 @@ class Trainer(object):
         self.dataset_name = dataset_name
         dataset = text_dataset.get_dataset(dataset_name,)
 
-        self.dataset = dataset.shuffle(seed=self.seed)
+        self.dataset = dataset.shuffle(seed=42)
         if args.eval_test:
             self.num_samples = min(self.num_samples,len(self.dataset['test']))
             print(f'Using {self.num_samples} samples for evaluation')
@@ -655,14 +598,12 @@ class Trainer(object):
             
     #TODO   
     @torch.no_grad()
-    def sample(self, num_samples=None, class_id=None, seed=42, test=False, cls_free_guidance=1.0, steps=None):
+    def sample(self, num_samples=None, class_id=None, seed=42, test=False, cls_free_guidance=1.0, steps=1):
         num_samples = default(num_samples, self.num_samples)
         accelerator = self.accelerator
         device = accelerator.device
         if self.accelerator.device == "cuda":
             torch.cuda.empty_cache() 
-        if steps == None:
-            steps = self.args.steps
 
         self.consistency.eval()
 
@@ -769,203 +710,7 @@ class Trainer(object):
     @torch.no_grad()
     def sample_seq2seq(self, num_samples=None, split='val', seed=42, num_candidates=None, cls_free_guidance=1.0,):
         raise NotImplementedError
-        assert split in ['train', 'val', 'test']
-        num_samples = default(num_samples, self.num_samples) if split != 'test' else len(self.dataset['test'])
-        num_candidates = default(num_candidates, self.seq2seq_candidates)
-        accelerator = self.accelerator
-        device = accelerator.device
-
-        self.ema.ema_model.eval()
-
-        # Extract references
-        reference_texts = []
-        source_texts = []
-        pred_texts = []
-
-        torch.manual_seed(seed)
-
-        if split == 'val':
-            dataloader = self.val_dataloader
-            prefix = ''
-        elif split == 'train':
-            dataloader = self.train_val_dataloader
-            prefix = 'train/'
-        elif split == 'test':
-            dataloader = self.test_dataloader
-            prefix = 'test/'
-        else:
-            raise ValueError(f'invalid split {split}')
         
-        diffusion = accelerator.unwrap_model(self.diffusion)
-        prefix += f'guide{cls_free_guidance}/' if cls_free_guidance != 1.0 else ''
-        for batch in dataloader:
-            data = batch.to(device)
-            seq2seq_cond = diffusion.context_encoder(input_ids = data['cond_input_ids'], attention_mask = data['cond_attention_mask']).last_hidden_state.float()
-            seq2seq_mask = data['cond_attention_mask'].bool()
-            pred_cand_list = []
-            ref_cand_list = []
-            source_cand_list = []
-            gen_kwargs = constant.generate_kwargs['beam']
-            gen_kwargs['max_length'] = self.args.max_seq_len
-            for _ in range(num_candidates):
-                l2_normalize = (hasattr(self.bart_model, 'l2_normalize_latents') and self.bart_model.l2_normalize_latents)
-                latents, mask = self.ema.ema_model.sample(batch_size=seq2seq_cond.shape[0], length=None, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask, cls_free_guidance=cls_free_guidance, l2_normalize=l2_normalize)
-                if self.args.normalize_latent:
-                    latents = self.ema.ema_model.unnormalize_latent(latents)
-                if self.latent_model_path:
-                    attention_mask = None
-                    encoder_output = BaseModelOutput(last_hidden_state=self.bart_model.get_decoder_input(latents.clone()))
-                else:
-                    attention_mask = mask.clone()
-                    encoder_output = BaseModelOutput(last_hidden_state=latents.clone())
-                sample_ids = self.bart_model.generate(encoder_outputs=encoder_output, attention_mask=attention_mask, **gen_kwargs)
-                texts_list = [self.tokenizer.decode(g, skip_special_tokens=True, clean_up_tokenization_spaces=True).strip() for g in sample_ids]
-                pred_cand_list.append(texts_list)
-
-                ref_cand_list.append([self.tokenizer.decode(g, skip_special_tokens=True, clean_up_tokenization_spaces=True).strip() for g in data['input_ids']])
-                source_cand_list.append([self.context_tokenizer.decode(g, skip_special_tokens=True, clean_up_tokenization_spaces=True).strip() for g in data['cond_input_ids']])
-            assert len(pred_cand_list) == num_candidates
-            assert len(ref_cand_list) == num_candidates
-            assert len(source_cand_list) == num_candidates
-            pred_texts.extend([val for tup in zip(*pred_cand_list) for val in tup])
-            reference_texts.extend([val for tup in zip(*ref_cand_list) for val in tup])
-            source_texts.extend([val for tup in zip(*source_cand_list) for val in tup])
-            if len(pred_texts) >= num_samples*num_candidates:
-                break
-        assert len(pred_texts) == len(reference_texts) == len(source_texts)
-        assert len(pred_texts) >= num_samples*num_candidates
-        pred_texts = pred_texts[:num_samples*num_candidates]
-        reference_texts = reference_texts[:num_samples*num_candidates]
-        source_texts = source_texts[:num_samples*num_candidates]
-
-         # Save samples and references to json
-        if split == 'test':
-            samples_dict = {'pred_texts': pred_texts, 'reference_texts': reference_texts, 'source_texts': source_texts}
-            save_path = os.path.join(self.results_folder, f'{prefix}_seq2seq_{split}_samples.json')    
-            # Create dir if it doesn't exist   
-            if not os.path.exists(os.path.dirname(save_path)):
-                os.makedirs(os.path.dirname(save_path))
-            with open(os.path.join(save_path), 'w') as f:
-                json.dump(samples_dict, f)
-
-        # Log samples
-        # source | reference | pred
-        columns = ['source', 'reference', 'pred']
-        data = []
-        for i in range(len(reference_texts)):
-            row = [source_texts[i], reference_texts[i], pred_texts[i]]
-            data.append(row)
-        table = wandb.Table(columns=columns, data=data)
-        accelerator.log({f"seq2seq/{prefix}{split}_samples": table}, self.step)
-
-        # Compute metrics
-        metrics = {}
-
-        if 'wmt' in self.dataset_name:
-            tokenize = 'intl' if self.dataset_name == 'wmt14-en-de' else '13a'
-
-            if num_candidates > 1:
-                mbr_sacrebleu_scores = np.zeros((num_samples, num_candidates))
-                for i in range(num_candidates):
-                    pred_texts_i = pred_texts[i::num_candidates]
-                    for j in range(num_candidates):
-                        if j == i:
-                            continue
-                        ref_texts_j = pred_texts[j::num_candidates]
-                        sacrebleu_arr = np.array([evaluation.compute_sacrebleu([pred], [ref], tokenize=tokenize, use_effective_order=True) for pred, ref in zip(pred_texts_i, ref_texts_j)])
-                        mbr_sacrebleu_scores[:, i] += sacrebleu_arr
-                best_indices = np.argmax(mbr_sacrebleu_scores, axis=1)
-                best_predictions = [pred_texts[i*num_candidates + idx] for i, idx in enumerate(best_indices)]
-                if split == 'test':
-                    gt_reference_texts = self.dataset['test']['text'][:num_samples]
-                elif split == 'val':
-                    gt_reference_texts = self.dataset['valid']['text'][:num_samples]
-                elif split == 'train':
-                    gt_reference_texts = reference_texts[::num_candidates]
-                else:
-                    raise NotImplementedError
-                metrics[f'model/seq2seq/{prefix}mbr_sacrebleu'] = evaluation.compute_sacrebleu(best_predictions, gt_reference_texts, tokenize=tokenize)
-        else:
-            # Get oracle rouge
-            raw_rouge_metrics = evaluation.compute_rouge(pred_texts, reference_texts, use_aggregator=False)
-            # Compute the max rouge score across num_candidates
-            for k, v in raw_rouge_metrics.items():
-                np_metric = np.array(v).reshape(num_samples, num_candidates)
-                np_metric = np.max(np_metric, axis=1)
-                metrics[f"model/seq2seq/{prefix}oracle_{k}"] = np_metric.mean().item()
-
-            if num_candidates > 1:
-                mbr_rouge_scores = np.zeros((num_samples, num_candidates))
-                for i in range(num_candidates):
-                    pred_texts_i = pred_texts[i::num_candidates]
-                    for j in range(num_candidates):
-                        if j == i:
-                            continue
-                        ref_texts_j = pred_texts[j::num_candidates]
-                        rouge2_arr = np.array(evaluation.compute_rouge(pred_texts_i, ref_texts_j, use_aggregator=False)['rouge2'])
-                        mbr_rouge_scores[:, i] += rouge2_arr
-                best_indices = np.argmax(mbr_rouge_scores, axis=1)
-                best_predictions = [pred_texts[i*num_candidates + idx] for i, idx in enumerate(best_indices)]
-                mbr_rouge_metrics = evaluation.compute_rouge(best_predictions, reference_texts[::num_candidates])
-                for k, v in mbr_rouge_metrics.items():
-                    metrics[f"model/seq2seq/{prefix}mbr_{k}"] = v
-                metrics[f'model/seq2seq/{prefix}mbr_bertscore'] = evaluation.compute_bertscore(best_predictions, reference_texts[::num_candidates])
-
-        # Get every num_candidates samples
-        pred_texts = pred_texts[::num_candidates]
-        reference_texts = reference_texts[::num_candidates]
-        source_texts = source_texts[::num_candidates]
-        
-        if 'wmt' in self.dataset_name:
-            save_path = os.path.join(self.results_folder, f'{prefix}{split}_samples.txt')   
-            # Create dir if it doesn't exist
-            if not os.path.exists(os.path.dirname(save_path)):
-                os.makedirs(os.path.dirname(save_path))
-            file_utils.save_text_samples(pred_texts, save_path)
-            tokenize = 'intl' if self.dataset_name == 'wmt14-en-de' else '13a'
-            # Compute BLEU
-            if split == 'test':
-                assert num_samples == len(self.dataset['test']['text'])
-                reference_texts = self.dataset['test']['text'][:num_samples]
-            elif split == 'val':
-                reference_texts = self.dataset['valid']['text'][:num_samples]
-            assert len(pred_texts) == len(reference_texts)
-            sacrebleu_score = evaluation.compute_sacrebleu(pred_texts, reference_texts, tokenize=tokenize)
-            metrics[f"model/seq2seq/{prefix}sacrebleu"] = sacrebleu_score
-            if metrics[f'model/seq2seq/{prefix}sacrebleu'] > self.best_seq2seq_metric and split == 'val' and cls_free_guidance == 1.0:
-                self.best_seq2seq_metric = metrics[f'model/seq2seq/{prefix}sacrebleu']
-                self.save(best=True)
-        else:
-            rouge_metrics = evaluation.compute_rouge(pred_texts, reference_texts)
-            for k, v in rouge_metrics.items():
-                metrics[f"model/seq2seq/{prefix}{k}"] = v
-
-            if rouge_metrics['rougeL'] > self.best_seq2seq_metric and split == 'val':
-                self.best_seq2seq_metric = rouge_metrics['rougeL']
-                self.save(best=True)
-
-            rouge_metrics = evaluation.compute_rouge(pred_texts, reference_texts, use_stemmer=True)
-            for k, v in rouge_metrics.items():
-                metrics[f"model/seq2seq/{prefix}stem_{k}"] = v
-
-            shuffled_pred_texts = random.sample(pred_texts, len(pred_texts))
-            shuffled_rouge_metrics = evaluation.compute_rouge(shuffled_pred_texts, reference_texts)
-            for k, v in shuffled_rouge_metrics.items():
-                metrics[f"model/seq2seq/{prefix}shuffled_{k}"] = v
-
-            metrics[f"model/seq2seq/{prefix}perplexity"] = evaluation.compute_perplexity(pred_texts)
-            metrics[f"model/seq2seq/{prefix}unique_wordcount"] = evaluation.compute_wordcount(pred_texts)
-            ngram_metrics = evaluation.compute_diversity(pred_texts)
-            for k, v in ngram_metrics.items():
-                metrics[f"model/seq2seq/{prefix}{k}"] = v
-            metrics[f"model/seq2seq/{prefix}memorization"] = evaluation.compute_memorization(pred_texts, self.dataset['train']['text'])
-            metrics[f"model/seq2seq/{prefix}bertscore"] = evaluation.compute_bertscore(pred_texts, reference_texts)
-        
-        accelerator.log(metrics, self.step)
-        print(metrics)
-        if self.accelerator.device == "cuda":
-            torch.cuda.empty_cache() 
-
     @torch.no_grad()
     def update_ema(self, online_params, target_params, rate):
         for online, target in zip(online_params, target_params):

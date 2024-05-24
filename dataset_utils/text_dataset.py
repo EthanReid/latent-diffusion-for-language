@@ -165,7 +165,7 @@ def get_dataloader(args, dataset, model_config, tokenizer, max_seq_len, mode='di
             batch_size=args.train_batch_size,
             shuffle=shuffle,
             pin_memory = True,
-            num_workers = 4
+            num_workers = args.num_workers
         )
     return dl
 

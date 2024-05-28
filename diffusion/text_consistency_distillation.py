@@ -127,6 +127,10 @@ def sigmoid_schedule(t, start = -3, end = 3, tau = 1, clamp_min = 1e-9):
     gamma = (-((t * (end - start) + start) / tau).sigmoid() + v_end) / (v_end - v_start)
     return gamma.clamp_(min = clamp_min, max = 1.)
 
+def n_schedule_value(t, T=1000, start=10, end=100):
+    nk = math.ceil(math.sqrt((min(t,T)/T)*((end+1)**2 - start**2)+start**2)-1)+1
+    return nk
+
 # converting gamma to alpha, sigma or logsnr
 
 def log_snr_to_alpha(log_snr):
@@ -168,7 +172,9 @@ class ConsistencyDistillation(nn.Module):
             k=1,
             steps=1,
             both_online=False,
-            is_consistency_distillation=False
+            is_consistency_distillation=False,
+            is_mcd = False,
+            n_schedule=None
     ):
         super().__init__()
         self.online_model = online_model #init to diffusion weights
@@ -180,6 +186,10 @@ class ConsistencyDistillation(nn.Module):
         self.both_online = both_online
         self.is_consistency_distillation = is_consistency_distillation
         self.forward = self.forward_cd if is_consistency_distillation else self.forward_ct
+        self.is_mcd = is_mcd
+        if is_mcd:
+            self.forward = self.forward_mcd
+        self.n_scedule = n_schedule
     
     @property
     def loss_fn(self):
@@ -254,11 +264,92 @@ class ConsistencyDistillation(nn.Module):
             z_hat_0 = self.consistency_model_predictions(z_t, mask, time, class_id=class_id, z_self_cond=None, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask, sampling=True, cls_free_guidance=cls_free_guidance, l2_normalize=l2_normalize)   
         return (z_hat_0, mask)
 
+    def mcm_sample(self, shape, lengths, class_id, seq2seq_cond, seq2seq_mask, cls_free_guidance=1.0, l2_normalize=False, invert=False, z_t=None, steps=1):
+        batch, device = shape[0], next(self.online_model.parameters()).device
+        if not exists(z_t):
+            z_t = torch.randn(shape, device=device)
+        if self.diffusion_model.using_latent_model:
+            mask = torch.ones((shape[0], shape[1]), dtype=torch.bool, device=device)
+        else:    
+            mask = [[True]*length + [False]*(self.diffusion_model.max_seq_len-length) for length in lengths]
+            mask = torch.tensor(mask, dtype=torch.bool, device=device)
+        print("multi step cm with step = {}".format(steps))
+        for i in range(steps):
+            t = 1-(i/steps)
+            s = t-(1/steps)
+            t = torch.tensor(t, device=device).unsqueeze(0)
+            s = torch.tensor(s, device=device).unsqueeze(0)
+            x_hat = self.consistency_model_predictions(z_t, mask, t=t, class_id=class_id, z_self_cond=None, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask, sampling=True, cls_free_guidance=cls_free_guidance, l2_normalize=l2_normalize)   
+            z_t = self.ddim(z_t, x_hat, t, s)
+        return (z_t, mask)
+
     def sample(self, batch_size, length, class_id=None, seq2seq_cond=None, seq2seq_mask=None, cls_free_guidance=1.0, l2_normalize=False, steps=None):
         if steps == None:
             steps = self.steps
         max_seq_len, latent_dim = self.diffusion_model.max_seq_len, self.diffusion_model.latent_dim
+        if self.is_mcd:
+            return self.mcm_sample((batch_size, max_seq_len, latent_dim), length, class_id, seq2seq_cond, seq2seq_mask, cls_free_guidance, l2_normalize, steps=steps)
         return self.scms((batch_size, max_seq_len, latent_dim), length, class_id, seq2seq_cond, seq2seq_mask, cls_free_guidance, l2_normalize, steps=steps)
+    
+    def get_alpha_sigma(self, tk, t, z):
+        alpha_tk = self.diffusion_model.sampling_schedule(tk)
+        alpha_t = self.diffusion_model.sampling_schedule(t)
+        alpha_tk, alpha_t = map(partial(right_pad_dims_to, z), (alpha_tk, alpha_t))
+        sigma_tk = (1-alpha_tk)
+        sigma_t = (1-alpha_t)
+        return alpha_tk.sqrt(), alpha_t.sqrt(), sigma_tk.sqrt(), sigma_t.sqrt()
+    def ddim(self, z_t, pred_x, tk, t):
+        alpha_tk, alpha_t, sigma_tk, sigma_t = self.get_alpha_sigma(tk, t, z_t)
+        return alpha_t*pred_x + ((sigma_t/sigma_tk)*(z_t-alpha_tk*pred_x))
+
+    def invDDIM(self, z_t, z_tk, tk, t):
+        alpha_tk, alpha_t, sigma_tk, sigma_t = self.get_alpha_sigma(tk, t, z_t)
+        x = (z_t-((sigma_t/sigma_tk)*z_tk))/(alpha_t-(alpha_tk*(sigma_t/sigma_tk)))
+        return x
+    
+    def aDDIM(self, z_t, pred_x, ground_x, tk, t, d=None):
+        if d==None:
+            d = z_t.ndim
+        alpha_tk, alpha_t, sigma_tk, sigma_t = self.get_alpha_sigma(tk, t, z_t)
+        x_var = (torch.norm(pred_x-ground_x)**2)/d
+        eps = (z_t-alpha_tk*pred_x)/sigma_tk
+        z_s_var = (alpha_t-alpha_tk*sigma_t/sigma_tk)**2 * x_var
+        z_s = alpha_t*pred_x+((sigma_t**2)+(d/torch.norm(eps)**2)*z_s_var)*eps
+        return z_s
+
+    def forward_mcd(self, txt_latent, mask, class_id, seq2seq_cond=None, seq2seq_mask=None, return_x_start=False, k=None, train_i=1, *args, **kwargs):
+        batch, l, d, device, max_seq_len, = *txt_latent.shape, txt_latent.device, self.diffusion_model.max_seq_len
+        ni = self.n_scedule(train_i)
+        T_step = int(np.round(ni/self.steps))
+        step = torch.randint(0, self.steps, (batch,), device=device).float()
+        n_rel_raw = torch.randint(1, T_step+1, (batch,), device=device).float()
+        #n_rel = n_rel_raw/ni
+        t_step_raw = step/self.steps
+        t_step = t_step_raw/ni
+        t_raw = t_step_raw + n_rel_raw/T_step
+        t = t_raw/ni
+        s_raw = t_raw-1/T_step
+        s = s_raw/ni
+        alpha_t, alpha_s, sigma_t, sigma_s = self.get_alpha_sigma(t, s, txt_latent)
+        
+        noise = torch.randn_like(txt_latent)
+        z_t = alpha_t*txt_latent + sigma_t*noise
+
+        with torch.no_grad():
+            x_teacher = self.diffusion_model.diffusion_model_predictions(z_t=z_t, mask=mask, t=t ,class_id=class_id, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask).pred_x_start
+
+        z_s = self.aDDIM(z_t, x_teacher, txt_latent, tk=t, t=s, d=d)
+        with torch.no_grad():
+            x_ref = self.consistency_model_predictions(z_t=z_s, mask=mask, t=s, z_self_cond=None,class_id=class_id, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask, online=self.both_online)
+        z_ref = self.ddim(z_s, x_ref, tk=s, t=t_step)
+
+        x = self.consistency_model_predictions(z_t=z_t, mask=mask, t=t, z_self_cond=None,class_id=class_id, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask)
+        x_inv = self.invDDIM(z_ref, z_t, tk=t, t=t_step)
+
+        loss = self.loss_fn(x,x_inv, reduction="none")
+        loss = rearrange([reduce(loss[i][:torch.sum(mask[i])], 'l d -> 1', 'mean') for i in range(txt_latent.shape[0])], 'b 1 -> b 1')
+        
+        return loss.mean()
 
     def forward_ct(self, txt_latent, mask, class_id, seq2seq_cond=None, seq2seq_mask=None, return_x_start=False, k=None, *args, **kwargs):
         if k == None:
@@ -1026,7 +1117,10 @@ class Trainer(object):
                     if self.decoding_loss:
                         raise NotImplementedError
                     else:
-                        loss = self.consistency(latent, mask, class_id=(data['label'] if self.class_conditional else None), seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask)
+                        if self.args.is_mcd:
+                            loss = self.consistency(latent, mask, class_id=(data['label'] if self.class_conditional else None), seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask, train_i=self.step)
+                        else:
+                            loss = self.consistency(latent, mask, class_id=(data['label'] if self.class_conditional else None), seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask)
                         loss = loss / self.gradient_accumulate_every
                         total_loss += loss.item()
                     self.accelerator.backward(loss)                
@@ -1088,7 +1182,10 @@ class Trainer(object):
                                     mask = torch.ones((latent.shape[0], self.num_encoder_latents), dtype=torch.bool).to(device)
                                 else:
                                     mask = data['attention_mask'].bool()
-                                loss = self.consistency(latent, mask, class_id=(data['label'] if self.class_conditional else None), seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask)
+                                if self.args.is_mcd:
+                                    loss = self.consistency(latent, mask, class_id=(data['label'] if self.class_conditional else None), seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask, train_i = self.step)
+                                else:
+                                    loss = self.consistency(latent, mask, class_id=(data['label'] if self.class_conditional else None), seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask)
                                 loss = loss / self.gradient_accumulate_every
                                 total_val_loss += loss.item()
                             logs["val_loss"] = total_val_loss 

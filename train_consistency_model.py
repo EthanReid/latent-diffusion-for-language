@@ -8,7 +8,7 @@ import torch
 
 import CONSTANTS
 from diffusion.text_denoising_diffusion import GaussianDiffusion
-from diffusion.text_consistency_distillation import ConsistencyDistillation, Trainer
+from diffusion.text_consistency_distillation import ConsistencyDistillation, Trainer, n_schedule_value
 from model.diffusion_transformer import DiffusionTransformer
 
 ATTN_HEAD_DIM=64
@@ -103,6 +103,10 @@ def main(args):
         scale = args.scale,
     ).to(args.device) #.cuda()
 
+    n_schedule = None
+    if args.is_mcd:
+        n_schedule = lambda t: n_schedule_value(t, args.n_schedule_t, args.n_schedule_start, args.n_schedule_end)
+
     consistencyDistillation = ConsistencyDistillation(
         online_model=online_model,
         target_model=target_model,
@@ -111,7 +115,9 @@ def main(args):
         k = args.k,
         steps = args.steps,
         both_online=args.both_online,
-        is_consistency_distillation=args.is_cd
+        is_consistency_distillation=args.is_cd,
+        is_mcd=args.is_mcd,
+        n_schedule=n_schedule
     )
 
     trainer = Trainer(
@@ -284,7 +290,10 @@ if __name__ == "__main__":
     parser.add_argument("--both_online", action="store_true", default=False)
     parser.add_argument("--is_cd", action="store_true", default=False)
     parser.add_argument("--num_workers", type=int, default=4)
-
+    parser.add_argument("--is_mcd", action="store_true", default=False)
+    parser.add_argument("--n_schedule_t", type=int, default=1000)
+    parser.add_argument("--n_schedule_start", type=int, default=10)
+    parser.add_argument("--n_schedule_end", type=int, default=100)
     
     args = parser.parse_args()
     assert not (args.eval and args.resume_training)

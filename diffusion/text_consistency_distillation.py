@@ -155,6 +155,7 @@ def scalings_for_boundary_conditions(timestep, sigma_data=0.5, timestep_scaling=
     c_out = (timestep / 0.1) / ((timestep / 0.1) ** 2 + sigma_data**2) ** 0.5
     return c_skip, c_out
 
+#TODO: misspelled boundary
 def scaling_for_ddim_boundry(tk, t):
     c_skip = t//tk
     ratio = t/tk
@@ -194,7 +195,10 @@ class ConsistencyDistillation(nn.Module):
         self.forward = self.forward_cd if is_consistency_distillation else self.forward_ct
         self.is_mcd = is_mcd
         if is_mcd:
-            self.forward = self.forward_mcd
+            if is_consistency_distillation:
+                self.forward = self.forward_mcd
+            else:
+                self.forward = self.forward_mct_z
         self.n_scedule = n_schedule
     
     @property
@@ -325,7 +329,7 @@ class ConsistencyDistillation(nn.Module):
         z_s = alpha_t*pred_x+((sigma_t**2)+(d/torch.norm(eps)**2)*z_s_var)*eps
         return z_s
 
-    def forward_mcd_x(self, txt_latent, mask, class_id, seq2seq_cond=None, seq2seq_mask=None, return_x_start=False, k=None, train_i=1, *args, **kwargs):
+    def forward_mcd(self, txt_latent, mask, class_id, seq2seq_cond=None, seq2seq_mask=None, return_x_start=False, k=None, train_i=1, *args, **kwargs):
         batch, l, d, device, max_seq_len, = *txt_latent.shape, txt_latent.device, self.diffusion_model.max_seq_len
         ni = self.n_scedule(train_i)
         T_step = int(np.round(ni/self.steps))
@@ -354,13 +358,12 @@ class ConsistencyDistillation(nn.Module):
         x = self.consistency_model_predictions(z_t=z_t, mask=mask, t=t, z_self_cond=None,class_id=class_id, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask)
         x_inv = self.invDDIM(z_ref, z_t, tk=t, t=t_step)
 
-        snr = (alpha_t**2)/(sigma_t**2)
         loss = self.loss_fn(x,x_inv, reduction="none")
         loss = rearrange([reduce(loss[i][:torch.sum(mask[i])], 'l d -> 1', 'mean') for i in range(txt_latent.shape[0])], 'b 1 -> b 1')
 
         return loss.mean()
 
-    def forward_mcd(self, txt_latent, mask, class_id, seq2seq_cond=None, seq2seq_mask=None, return_x_start=False, k=None, train_i=1, *args, **kwargs):
+    def forward_mcd_z(self, txt_latent, mask, class_id, seq2seq_cond=None, seq2seq_mask=None, return_x_start=False, k=None, train_i=1, *args, **kwargs):
         batch, l, d, device, max_seq_len, = *txt_latent.shape, txt_latent.device, self.diffusion_model.max_seq_len
         ni = self.n_scedule(train_i)
         T_step = int(np.round(ni/self.steps))
@@ -382,6 +385,39 @@ class ConsistencyDistillation(nn.Module):
             x_teacher = self.diffusion_model.diffusion_model_predictions(z_t=z_t, mask=mask, t=t ,class_id=class_id, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask).pred_x_start
 
         z_s = self.aDDIM(z_t, x_teacher, txt_latent, tk=t, t=s, d=d)
+        with torch.no_grad():
+            x_ref = self.consistency_model_predictions(z_t=z_s, mask=mask, t=s, z_self_cond=None,class_id=class_id, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask, online=self.both_online)
+        z_ref_teacher = self.ddim(z_s, x_ref, tk=s, t=t_step)
+
+        x = self.consistency_model_predictions(z_t=z_t, mask=mask, t=t, z_self_cond=None,class_id=class_id, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask)
+        z_ref_online = self.ddim(z_t, x, t, t_step)
+
+        loss = self.loss_fn(z_ref_online,z_ref_teacher, reduction="none")
+        loss = rearrange([reduce(loss[i][:torch.sum(mask[i])], 'l d -> 1', 'mean') for i in range(txt_latent.shape[0])], 'b 1 -> b 1')
+        
+        return loss.mean()
+    
+    def forward_mct_z(self, txt_latent, mask, class_id, seq2seq_cond=None, seq2seq_mask=None, return_x_start=False, k=None, train_i=1, *args, **kwargs):
+        batch, l, d, device, max_seq_len, = *txt_latent.shape, txt_latent.device, self.diffusion_model.max_seq_len
+        ni = self.n_scedule(train_i)
+        T_step = int(np.round(ni/self.steps))
+        step = torch.randint(0, self.steps, (batch,), device=device).float()
+        n_rel_raw = torch.randint(1, T_step+1, (batch,), device=device).float()
+        #n_rel = n_rel_raw/ni
+        t_step_raw = step/self.steps
+        t_step = t_step_raw/ni
+        t_raw = t_step_raw + n_rel_raw/T_step
+        t = t_raw/ni
+        s_raw = t_raw-1/T_step
+        s = s_raw/ni
+        alpha_t, alpha_s, sigma_t, sigma_s = self.get_alpha_sigma(t, s, txt_latent)
+        
+        noise = torch.randn_like(txt_latent)
+        z_t = alpha_t*txt_latent + sigma_t*noise
+
+        x_teacher = txt_latent
+
+        z_s = self.ddim(z_t, x_teacher, tk=t, t=s)
         with torch.no_grad():
             x_ref = self.consistency_model_predictions(z_t=z_s, mask=mask, t=s, z_self_cond=None,class_id=class_id, seq2seq_cond=seq2seq_cond, seq2seq_mask=seq2seq_mask, online=self.both_online)
         z_ref_teacher = self.ddim(z_s, x_ref, tk=s, t=t_step)

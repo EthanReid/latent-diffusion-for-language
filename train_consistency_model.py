@@ -305,7 +305,7 @@ if __name__ == "__main__":
             saved_args = json.load(f)
         args_dict = vars(args)
         # Hold out sampling/evaluation parameters
-        heldout_params = {'wandb_name', 'output_dir', 'resume_dir', 'eval', 'eval_test', 'num_samples', 'sampling_timesteps', 'sampling_schedule', 'seq2seq_candidates', 'scale', 'sampler', 'resume_training', 'steps', 'k', 'loss_type', 'save_and_sample_every', 'learning_rate'}
+        heldout_params = {'wandb_name', 'output_dir', 'resume_dir', 'eval', 'eval_test', 'num_samples', 'sampling_timesteps', 'sampling_schedule', 'seq2seq_candidates', 'scale', 'sampler', 'resume_training', 'steps', 'k', 'loss_type', 'save_and_sample_every', 'learning_rate', 'train_batch_size'}
         # Overwrite args with saved args
         for k,v in saved_args.items():
             if k in heldout_params:

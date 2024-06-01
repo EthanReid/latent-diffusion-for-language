@@ -10,7 +10,9 @@ import CONSTANTS
 from diffusion.text_denoising_diffusion import GaussianDiffusion
 from diffusion.text_consistency_distillation import ConsistencyDistillation, Trainer, n_schedule_value
 from model.diffusion_transformer import DiffusionTransformer
+import os
 
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 ATTN_HEAD_DIM=64
 
 def get_diffusion_latent_dims(args):

@@ -117,7 +117,8 @@ def main(args):
         both_online=args.both_online,
         is_consistency_distillation=args.is_cd,
         is_mcd=args.is_mcd,
-        n_schedule=n_schedule
+        n_schedule=n_schedule,
+        args=args
     )
 
     trainer = Trainer(
@@ -294,6 +295,13 @@ if __name__ == "__main__":
     parser.add_argument("--n_schedule_t", type=int, default=1000)
     parser.add_argument("--n_schedule_start", type=int, default=10)
     parser.add_argument("--n_schedule_end", type=int, default=100)
+    parser.add_argument("--addim", action="store_true", default=False)
+    parser.add_argument("--addim_n", type=float, default=0.75)
+    parser.add_argument("--t_scaler", type=float, default=1.0)
+    parser.add_argument("--masked_loss", action="store_true", default=False)
+    parser.add_argument("--test_ddim", action="store_true", default=False)
+    parser.add_argument("--is_z", action="store_true", default=False)
+
     
     args = parser.parse_args()
     assert not (args.eval and args.resume_training)
